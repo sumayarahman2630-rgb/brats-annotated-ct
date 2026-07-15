@@ -43,6 +43,9 @@ def parse_args():
     parser.add_argument("--num_patients", type=int, default=3)
     parser.add_argument("--num_steps", type=int, default=None, help="DDIM steps; defaults to diffusion.ddim_steps in the config.")
     parser.add_argument("--output_dir", type=str, default="/kaggle/working/synthrad_val_comparison")
+    parser.add_argument("--checkpoint_path", type=str, default=None,
+                         help="Use this exact checkpoint file instead of auto-finding the latest one -- "
+                              "e.g. to A/B a specific earlier step against the current one.")
     return parser.parse_args()
 
 
@@ -66,10 +69,15 @@ def main():
 
     model = build_stage1_model(config).to(device)
 
-    search_dirs = [config["checkpoint"]["working_dir"]] + list(config["checkpoint"].get("extra_resume_dirs", []))
-    ckpt_path = find_latest_checkpoint(search_dirs)
-    if ckpt_path is None:
-        raise RuntimeError(f"No Stage 1 checkpoint found in {search_dirs}.")
+    if args.checkpoint_path:
+        ckpt_path = args.checkpoint_path
+        if not os.path.exists(ckpt_path):
+            raise RuntimeError(f"--checkpoint_path {ckpt_path!r} does not exist.")
+    else:
+        search_dirs = [config["checkpoint"]["working_dir"]] + list(config["checkpoint"].get("extra_resume_dirs", []))
+        ckpt_path = find_latest_checkpoint(search_dirs)
+        if ckpt_path is None:
+            raise RuntimeError(f"No Stage 1 checkpoint found in {search_dirs}.")
     # ema=None: no EMA object is created at all, so raw trained weights stay in
     # `model` with no possibility of a later ema.copy_to(model) call overwriting them.
     step, _extra = load_checkpoint(ckpt_path, model, ema=None, optimizer=None, scheduler=None, map_location=device.type)
@@ -117,6 +125,24 @@ def main():
             patient_id, psnr_full, ssim_full, psnr_fg,
         )
         results.append((patient_id, psnr_full, ssim_full, psnr_fg))
+
+        # Background-vs-foreground separation check: does the model actually distinguish
+        # "outside brain" from "inside brain" at all? A working model should show synthetic
+        # background close to -1000 (matching real) and synthetic foreground noticeably
+        # higher/more varied than synthetic background -- if synthetic background and
+        # foreground means are close to each other, the model isn't localizing the brain
+        # region at all, which would explain PSNR worse than a trivial flat-background guess.
+        bg_mask = ~mask_arr
+        log.info(
+            "  real:      background mean=%7.1f std=%6.1f | foreground mean=%7.1f std=%6.1f",
+            real_hu[bg_mask].mean() if bg_mask.any() else float("nan"), real_hu[bg_mask].std() if bg_mask.any() else float("nan"),
+            real_hu[mask_arr].mean(), real_hu[mask_arr].std(),
+        )
+        log.info(
+            "  synthetic: background mean=%7.1f std=%6.1f | foreground mean=%7.1f std=%6.1f",
+            synth_hu[bg_mask].mean() if bg_mask.any() else float("nan"), synth_hu[bg_mask].std() if bg_mask.any() else float("nan"),
+            synth_hu[mask_arr].mean(), synth_hu[mask_arr].std(),
+        )
 
         mid = real_hu.shape[0] // 2
         mri_arr = mri.squeeze(0).squeeze(0).cpu().numpy()
