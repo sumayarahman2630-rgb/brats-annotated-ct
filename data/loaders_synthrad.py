@@ -1,18 +1,18 @@
 """Dataset for the full SynthRAD2023 brain MRI-CT cohort.
 
-Discovery is pattern-based rather than a hardcoded path layout: the exact
-nesting of the Kaggle-hosted copy (fd7akxj65n5yjxwds/synthrad-2023) hasn't
-been inspected from this machine, so `discover_synthrad_patients` walks the
-tree and matches per-patient leaf folders by filename pattern (the official
-SynthRAD2023 release uses ct.nii.gz / mr.nii.gz / mask.nii.gz per patient
-folder; patient-prefixed variants are also matched). It logs what it found
-so a wrong `synthrad_root` fails loudly with zero patients instead of
-silently training on nothing.
+Confirmed exact layout (2026-07-15): every immediate subfolder of
+data.synthrad_root (.../synthrad-2023/Task1/brain) is either a patient
+folder containing ct.nii, mask.nii, mr.nii, or a non-patient folder like
+"overview" that Kaggle copies alongside the patient data. `discover_
+synthrad_patients` qualifies a folder as a patient by *content* -- it
+actually contains all three required files -- rather than by excluding
+known non-patient names. That's deliberately more robust than a name
+denylist: any other stray folder that shows up in a future dataset version
+gets excluded the same way "overview" is, with no code change needed.
 """
 from __future__ import annotations
 
 import logging
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,44 +46,64 @@ class SynthRADPatient:
     patient_id: str
     ct_path: str
     mr_path: str
-    mask_path: str | None
+    mask_path: str
 
 
-def discover_synthrad_patients(root: str, region: str | None = "brain") -> list[SynthRADPatient]:
-    root = str(root)
-    all_dirs = [dirpath for dirpath, _dirnames, _filenames in os.walk(root)]
-    # Only filter by region if the dataset layout actually encodes it somewhere
-    # (e.g. .../Task1/brain/...) -- for a flat/unlabeled layout, don't filter.
-    region_is_meaningful = region is not None and any(region.lower() in d.lower() for d in all_dirs)
+def discover_synthrad_patients(root: str, region: str | None = None) -> list[SynthRADPatient]:
+    """root should be the directory whose immediate children are patient
+    folders (i.e. .../synthrad-2023/Task1/brain). `region` is an optional
+    convenience for callers that instead point root at the dataset's top
+    level (.../synthrad-2023): if root/Task1/<region> exists, it's used
+    as the actual patient-folder directory."""
+    root_path = Path(root)
+    if region:
+        candidate = root_path / "Task1" / region
+        if candidate.is_dir():
+            root_path = candidate
+
+    if not root_path.is_dir():
+        log.warning("discover_synthrad_patients: %s is not a directory", root_path)
+        return []
 
     patients: list[SynthRADPatient] = []
-    for dirpath, _dirnames, filenames in os.walk(root):
-        if region_is_meaningful and region.lower() not in dirpath.lower():
+    n_skipped = 0
+    for folder in sorted(root_path.iterdir()):
+        if not folder.is_dir():
             continue
 
+        filenames = [f.name for f in folder.iterdir() if f.is_file()]
         ct_file = next((f for f in filenames if _CT_RE.search(f)), None)
         mr_file = next((f for f in filenames if _MR_RE.search(f)), None)
         mask_file = next((f for f in filenames if _MASK_RE.search(f)), None)
 
-        if ct_file and mr_file:
-            patient_id = os.path.basename(dirpath.rstrip("/\\")) or ct_file.split(".")[0]
-            patients.append(
-                SynthRADPatient(
-                    patient_id=patient_id,
-                    ct_path=os.path.join(dirpath, ct_file),
-                    mr_path=os.path.join(dirpath, mr_file),
-                    mask_path=os.path.join(dirpath, mask_file) if mask_file else None,
-                )
+        if not (ct_file and mr_file and mask_file):
+            n_skipped += 1
+            log.debug(
+                "discover_synthrad_patients: skipping %s -- not a complete patient folder (ct=%s mr=%s mask=%s)",
+                folder.name, bool(ct_file), bool(mr_file), bool(mask_file),
             )
+            continue
 
-    log.info("discover_synthrad_patients: found %d patients under %s (region=%s)", len(patients), root, region)
+        patients.append(
+            SynthRADPatient(
+                patient_id=folder.name,
+                ct_path=str(folder / ct_file),
+                mr_path=str(folder / mr_file),
+                mask_path=str(folder / mask_file),
+            )
+        )
+
+    log.info(
+        "discover_synthrad_patients: found %d patients under %s (%d non-patient folders skipped, e.g. 'overview')",
+        len(patients), root_path, n_skipped,
+    )
     if not patients:
         log.warning(
-            "No SynthRAD patients found under %s. Check data.synthrad_root and data.region in the config "
+            "No SynthRAD patients found under %s. Check data.synthrad_root in the config "
             "against the actual Kaggle input path before training.",
-            root,
+            root_path,
         )
-    return sorted(patients, key=lambda p: p.patient_id)
+    return patients
 
 
 class SynthRADBrainDataset(Dataset):
@@ -126,11 +146,8 @@ class SynthRADBrainDataset(Dataset):
         ct_arr = sitk.GetArrayFromImage(ct_img).astype(np.float32)
         mr_arr = sitk.GetArrayFromImage(mr_img).astype(np.float32)
 
-        if patient.mask_path is not None:
-            mask_img = resample_to_spacing(sitk.ReadImage(patient.mask_path), self.target_spacing, is_mask=True, default_value=0.0)
-            mask_arr = sitk.GetArrayFromImage(mask_img).astype(np.uint8)
-        else:
-            mask_arr = (ct_arr > self.ct_clip_range[0] + 1.0).astype(np.uint8)
+        mask_img = resample_to_spacing(sitk.ReadImage(patient.mask_path), self.target_spacing, is_mask=True, default_value=0.0)
+        mask_arr = sitk.GetArrayFromImage(mask_img).astype(np.uint8)
 
         if self.match_brats_domain and np.any(mask_arr):
             ct_arr = apply_mask(ct_arr, mask_arr, background_value=CT_BACKGROUND_HU)
@@ -172,7 +189,7 @@ class SynthRADBrainDataset(Dataset):
 
 def build_synthrad_dataloaders(config: dict, seed: int = 0) -> tuple[DataLoader, DataLoader]:
     data_cfg = config["data"]
-    patients = discover_synthrad_patients(data_cfg["synthrad_root"], region=data_cfg.get("region", "brain"))
+    patients = discover_synthrad_patients(data_cfg["synthrad_root"], region=data_cfg.get("region"))
     if not patients:
         raise RuntimeError(
             f"No SynthRAD patients discovered under {data_cfg['synthrad_root']!r}. "
