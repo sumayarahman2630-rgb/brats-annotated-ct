@@ -54,6 +54,7 @@ class Stage1MRI2CTDiffusion(nn.Module):
         subband_loss_weights: tuple[float, ...] | None = None,
         ddim_steps: int = 100,
         ddim_eta: float = 0.0,
+        use_checkpoint: bool = False,
     ):
         super().__init__()
         self.num_timesteps = timesteps
@@ -71,6 +72,7 @@ class Stage1MRI2CTDiffusion(nn.Module):
             num_heads=num_heads,
             num_groups=num_groups,
             dropout=dropout,
+            use_checkpoint=use_checkpoint,
         )
 
         betas = _make_linear_beta_schedule(timesteps, beta_start, beta_end)
@@ -169,6 +171,7 @@ def build_stage1_model(config: dict) -> Stage1MRI2CTDiffusion:
         num_heads=model_cfg.get("num_heads", 4),
         num_groups=model_cfg.get("num_groups", 32),
         dropout=model_cfg.get("dropout", 0.0),
+        use_checkpoint=model_cfg.get("use_checkpoint", False),
         timesteps=diff_cfg.get("timesteps", 1000),
         beta_start=diff_cfg.get("beta_start", 1e-4),
         beta_end=diff_cfg.get("beta_end", 2e-2),

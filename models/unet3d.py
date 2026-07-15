@@ -15,6 +15,7 @@ from contextlib import contextmanager
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ def _norm_act(num_groups: int, channels: int) -> nn.Sequential:
 
 
 class ResBlock3D(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, emb_dim: int, num_groups: int = 32, dropout: float = 0.0):
+    def __init__(self, in_channels: int, out_channels: int, emb_dim: int, num_groups: int = 32, dropout: float = 0.0, use_checkpoint: bool = False):
         super().__init__()
         self.in_norm_act = _norm_act(num_groups, in_channels)
         self.conv1 = nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1)
@@ -80,13 +81,25 @@ class ResBlock3D(nn.Module):
             if in_channels != out_channels
             else nn.Identity()
         )
+        self.use_checkpoint = use_checkpoint
 
-    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
+    def _forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
         h = self.conv1(self.in_norm_act(x))
         scale, shift = self.emb_proj(emb)[:, :, None, None, None].chunk(2, dim=1)
         h = self.out_norm(h) * (1 + scale) + shift
         h = self.conv2(self.out_act_drop(h))
         return h + self.skip(x)
+
+    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
+        # Activation checkpointing trades compute for memory: instead of keeping every
+        # intermediate (in particular the fp32 GroupNorm activations autocast can't shrink
+        # -- see CLAUDE.md's "Known bugs fixed") around for backward, only x/emb are kept
+        # and the whole block is recomputed during backward. Only worth it (and only
+        # active) while actually training -- there's no backward pass during eval/sampling,
+        # so it would just add recompute overhead for nothing.
+        if self.use_checkpoint and self.training:
+            return checkpoint(self._forward, x, emb, use_reentrant=False)
+        return self._forward(x, emb)
 
 
 class SelfAttention3D(nn.Module):
@@ -148,9 +161,9 @@ class SelfAttention3D(nn.Module):
 
 
 class ResAttnBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, emb_dim: int, num_groups: int, dropout: float, use_attn: bool, num_heads: int):
+    def __init__(self, in_channels: int, out_channels: int, emb_dim: int, num_groups: int, dropout: float, use_attn: bool, num_heads: int, use_checkpoint: bool = False):
         super().__init__()
-        self.res = ResBlock3D(in_channels, out_channels, emb_dim, num_groups, dropout)
+        self.res = ResBlock3D(in_channels, out_channels, emb_dim, num_groups, dropout, use_checkpoint=use_checkpoint)
         self.attn = SelfAttention3D(out_channels, num_heads, num_groups) if use_attn else None
 
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
@@ -197,6 +210,7 @@ class UNet3D(nn.Module):
         num_heads: int = 4,
         num_groups: int = 32,
         dropout: float = 0.0,
+        use_checkpoint: bool = False,
     ):
         super().__init__()
         emb_dim = base_channels * 4
@@ -224,7 +238,7 @@ class UNet3D(nn.Module):
             level_blocks = nn.ModuleList()
             for _ in range(num_res_blocks):
                 use_attn = resolution_factor in attention_resolutions
-                level_blocks.append(ResAttnBlock(ch, out_ch, emb_dim, num_groups, dropout, use_attn, num_heads))
+                level_blocks.append(ResAttnBlock(ch, out_ch, emb_dim, num_groups, dropout, use_attn, num_heads, use_checkpoint=use_checkpoint))
                 ch = out_ch
                 skip_channels.append(ch)
             self.down_blocks.append(level_blocks)
@@ -234,9 +248,9 @@ class UNet3D(nn.Module):
                 resolution_factor *= 2
 
         # --- bottleneck ---
-        self.mid_block1 = ResBlock3D(ch, ch, emb_dim, num_groups, dropout)
+        self.mid_block1 = ResBlock3D(ch, ch, emb_dim, num_groups, dropout, use_checkpoint=use_checkpoint)
         self.mid_attn = SelfAttention3D(ch, num_heads, num_groups)
-        self.mid_block2 = ResBlock3D(ch, ch, emb_dim, num_groups, dropout)
+        self.mid_block2 = ResBlock3D(ch, ch, emb_dim, num_groups, dropout, use_checkpoint=use_checkpoint)
 
         # --- decoder: mirrors the encoder, consuming skip_channels in LIFO order ---
         self.up_blocks = nn.ModuleList()    # ModuleList[level] = ModuleList[ResAttnBlock], levels in decoder order (coarse -> fine)
@@ -248,7 +262,7 @@ class UNet3D(nn.Module):
             for _ in range(num_res_blocks + 1):
                 skip_ch = skip_channels.pop()
                 use_attn = resolution_factor in attention_resolutions
-                level_blocks.append(ResAttnBlock(ch + skip_ch, out_ch, emb_dim, num_groups, dropout, use_attn, num_heads))
+                level_blocks.append(ResAttnBlock(ch + skip_ch, out_ch, emb_dim, num_groups, dropout, use_attn, num_heads, use_checkpoint=use_checkpoint))
                 ch = out_ch
             self.up_blocks.append(level_blocks)
             if level != 0:

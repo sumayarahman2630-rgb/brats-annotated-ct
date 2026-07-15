@@ -128,9 +128,11 @@ is tumor-region CT, not a full-head radiotherapy-planning CT.
 **Model capacity:** base_channels=64, channel_mult=(1,2,4,4), 2 res-blocks per
 level, self-attention at the bottleneck only (`attention_resolutions: [8]`
 for `channel_mult`'s 4 levels — **not** `[2, 4]` or even `[4, 8]`, both of
-which OOM'd on a real T4; see "Known bugs fixed" below), 32 groups. All
-overridable in `configs/stage1_synthrad.yaml`; nothing hardcoded in the
-model file.
+which OOM'd on a real T4; see "Known bugs fixed" below), 32 groups,
+activation checkpointing on every `ResBlock3D` (`use_checkpoint: true`,
+also see "Known bugs fixed" — this is what addresses the decoder GroupNorm
+OOM that showed up once attention was fixed). All overridable in
+`configs/stage1_synthrad.yaml`; nothing hardcoded in the model file.
 
 **Diffusion:** standard DDPM, 1000 linear-schedule timesteps, epsilon
 prediction, MSE loss averaged over the 8 wavelet subbands (equal weighting,
@@ -208,6 +210,52 @@ keeps it under the T4's budget (check the log for the fallback warning —
 its absence means an efficient backup ran), keep `[4, 8]` for the real
 training run since it's closer to the original design intent. If it still
 OOMs or the fallback warning fires, stay on `[8]`.
+
+**2026-07-15 (round 3) — OOM moved to the decoder, inside `group_norm`.**
+With attention fixed, the next smoke test OOM'd elsewhere: 1.14 GiB
+requested inside a `group_norm` call in a decoder block, with 13.55/14.56
+GiB already in use. Not an algorithm bug this time -- classic U-Net decoder
+memory pressure: skip-connection concatenation roughly doubles channel
+count right before the highest-resolution decoder blocks, and mixed
+precision (`training.amp`, already on by default since the original
+training loop) doesn't fully cover it, because autocast keeps GroupNorm in
+fp32 for numerical stability -- exactly where this OOM'd. Two standard
+fixes, requested in this order and both applied since neither alone was
+confirmed sufficient without a GPU to test on:
+1. Confirmed AMP was already correctly wired (it's not new) -- nothing to
+   fix there, just verified `torch.amp.autocast`/`GradScaler` are active
+   by default and correctly wrap every forward/backward in `train_stage1.py`.
+2. **Added activation checkpointing** (`torch.utils.checkpoint`) to
+   `ResBlock3D` -- recomputes each block's forward during backward instead
+   of retaining every intermediate (including the fp32 GroupNorm ones AMP
+   can't shrink). New `model.use_checkpoint` config flag (default `true`),
+   threaded through `ResAttnBlock` and `UNet3D` to every encoder, bottleneck,
+   and decoder `ResBlock3D` -- applied network-wide rather than
+   decoder-only as first suggested, since it's one flag instead of two and
+   strictly saves more memory with no downside beyond a bit more recompute
+   time. Only active during `model.train()`; `sample()`/`eval()` skip it
+   (nothing to save memory on without a backward pass).
+
+**Verified without a GPU:** checkpointed vs. non-checkpointed forward AND
+backward produce bit-identical output and gradients (max diff `0.0` across
+all parameters, same seed) -- checkpointing is mathematically a no-op,
+purely a memory/compute-time trade, confirmed correct on CPU. Full
+train→resume→Stage 2 regression suite still passes identically with
+`use_checkpoint: true` wired through the real config.
+
+**NOT verified (no CUDA here):** the actual GiB savings on a real T4, and
+specifically the interaction between activation checkpointing and
+`autocast` under real mixed precision -- PyTorch's non-reentrant checkpoint
+(`use_reentrant=False`, used here) is documented to correctly save/restore
+the autocast context across the recompute, so this should work, but "should"
+isn't "confirmed." **Run the smoke test again on Kaggle** with no command
+change needed (`use_checkpoint: true` is now the config default) --
+`python -m training.train_stage1 --config configs/stage1_synthrad.yaml --max_steps 100 --max_patients 3`.
+If it still OOMs at the same GroupNorm call, the next lever (not yet tried)
+is `training.batch_size`/`grad_accum_steps` interaction or lowering
+`model.base_channels` -- deliberately last, per the user's explicit
+priority order, since those reduce model capacity/quality rather than
+just trading compute for memory.
 
 ## Repo layout
 

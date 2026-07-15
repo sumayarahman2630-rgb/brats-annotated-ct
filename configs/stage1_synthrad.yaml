@@ -44,6 +44,17 @@ model:
   num_heads: 4
   num_groups: 32
   dropout: 0.0
+  # Activation checkpointing (torch.utils.checkpoint): recomputes each ResBlock3D's
+  # forward pass during backward instead of keeping every intermediate activation
+  # around -- trades ~20-30% more compute time for a large memory cut, especially at
+  # the high-resolution decoder levels where post-skip-concat channel counts spike
+  # (the 2026-07-15 GroupNorm OOM was there specifically; GroupNorm doesn't get
+  # autocast's fp16 memory savings, so this is the lever that actually addresses it).
+  # Applies network-wide (encoder+bottleneck+decoder), not just the decoder --
+  # strictly more memory saved for the same one flag, no reason to scope it narrower.
+  # Only active during model.train() -- no-op during eval()/sample(), since there's
+  # no backward pass to save memory on there.
+  use_checkpoint: true
 
 diffusion:
   timesteps: 1000
