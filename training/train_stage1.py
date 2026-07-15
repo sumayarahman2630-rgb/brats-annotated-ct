@@ -188,7 +188,13 @@ def main():
     global_step = 0
     if latest_ckpt is not None:
         global_step, _extra = load_checkpoint(latest_ckpt, model, ema, optimizer, scheduler, map_location=device.type)
-        log.info("Resumed from checkpoint %s at step %d", latest_ckpt, global_step)
+        # EMA.load_state_dict overwrites ema.decay with whatever the checkpoint stored --
+        # without this, changing training.ema_decay in the config would be silently
+        # ignored on resume. Let the current config win, so continued-training runs can
+        # actually adjust it (e.g. lowering it so EMA converges faster on a short
+        # continuation, instead of staying stuck at whatever decay the original run used).
+        ema.decay = train_cfg.get("ema_decay", 0.9999)
+        log.info("Resumed from checkpoint %s at step %d (ema.decay set to config value %.4f)", latest_ckpt, global_step, ema.decay)
     else:
         log.info("No checkpoint found in %s -- starting from scratch", search_dirs)
 

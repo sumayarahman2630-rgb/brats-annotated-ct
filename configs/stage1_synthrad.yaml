@@ -96,7 +96,18 @@ diffusion:
   beta_start: 0.0001
   beta_end: 0.02
   predict: "epsilon"
-  subband_loss_weights: [1, 1, 1, 1, 1, 1, 1, 1]   # LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH
+  # 2026-07-16 (round 6, continued-training pass): LLL (coarse structure)
+  # weighted 3x over the 7 detail subbands. First 5500 steps (equal weights)
+  # produced a smooth gray texture with faint scattered artifacts but no
+  # visible brain shape -- consistent with a wavelet-domain model that's
+  # learned rough intensity statistics (LLL, low-dimensional, converges
+  # fast) but not yet the conditioning->shape correlation or clean detail
+  # subbands (higher-dimensional, needs more steps). With only a few more
+  # thousand steps available before the deadline, biasing gradient signal
+  # toward LLL trades some detail-subband quality for a better chance of
+  # visible brain shape emerging in the time left -- the actual goal
+  # tonight. Revert to equal weights for a real full training run.
+  subband_loss_weights: [3, 1, 1, 1, 1, 1, 1, 1]   # LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH
   ddim_steps: 30                      # dropped from 100 -> 30 (round 5): faster Stage 2 generation to cover more BraTS patients in the remaining time budget; run_stage2_brats.py's --num_steps overrides this per-run without editing the file
   ddim_eta: 0.0                       # 0 = deterministic DDIM (fast); 1 = stochastic, approximates ancestral DDPM
 
@@ -126,8 +137,25 @@ training:
   # training time budget is up and move on to Stage 2 with whatever checkpoint
   # exists then. Restore to 200000 (and a longer warmup) for a real full run.
   warmup_steps: 150
-  total_steps: 5500
-  ema_decay: 0.9999
+  # total_steps: 5500 -> 9000 (round 6): the completed 5500-step run finished
+  # its cosine schedule (LR annealed to 0); bumping total_steps and resuming
+  # from the existing checkpoint correctly REOPENS the cosine schedule at a
+  # useful LR rather than staying stuck near 0 (verified locally: resuming
+  # with a larger total_steps after a completed short schedule reopens LR
+  # from ~peak and re-anneals, doesn't need any other code change). 9000 is
+  # sized to roughly the remaining time budget at the measured ~4s/step --
+  # same as before, a planning estimate: stop whenever the time budget is
+  # up, checkpoint_interval=250 means there's always a recent save.
+  total_steps: 9000
+  # ema_decay: 0.9999 -> 0.995 (round 6): lowers the EMA time constant from
+  # ~10,000 steps to ~200 steps. The existing checkpoint's EMA state is still
+  # contaminated (see CLAUDE.md's "Known bugs fixed" -- 57.7% random-init
+  # after 5500 steps at the old decay), but continuing at this lower decay
+  # for even a few hundred more steps lets EMA actually converge and become
+  # usable again, in case there's time to compare EMA vs. raw weights at the
+  # end. Stage 2 still defaults to use_ema:false regardless, so this is a
+  # safety net, not something the current workflow depends on.
+  ema_decay: 0.995
   amp: true                            # mixed precision -- roughly halves VRAM use and speeds up training on Kaggle GPUs
   grad_clip_norm: 1.0
   log_interval: 25                     # steps between progress-log-file writes
