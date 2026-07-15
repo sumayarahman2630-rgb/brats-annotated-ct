@@ -77,13 +77,31 @@ def init_log_file(path: str, resuming: bool) -> None:
         return
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["step", "split", "loss", "lr", "elapsed_sec"] + [f"mse_{n}" for n in SUBBAND_NAMES])
+        writer.writerow(
+            ["step", "split", "loss", "lr", "elapsed_sec", "data_sec", "fwd_sec", "bwd_sec", "opt_sec"]
+            + [f"mse_{n}" for n in SUBBAND_NAMES]
+        )
 
 
-def append_log_row(path: str, step: int, split: str, loss: float, lr: float, elapsed: float, per_subband) -> None:
+def append_log_row(
+    path: str, step: int, split: str, loss: float, lr: float, elapsed: float,
+    per_subband, data_sec: float = 0.0, fwd_sec: float = 0.0, bwd_sec: float = 0.0, opt_sec: float = 0.0,
+) -> None:
     with open(path, "a", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([step, split, f"{loss:.6f}", f"{lr:.8f}", f"{elapsed:.1f}"] + [f"{v:.6f}" for v in per_subband.tolist()])
+        writer.writerow(
+            [step, split, f"{loss:.6f}", f"{lr:.8f}", f"{elapsed:.1f}",
+             f"{data_sec:.3f}", f"{fwd_sec:.3f}", f"{bwd_sec:.3f}", f"{opt_sec:.3f}"]
+            + [f"{v:.6f}" for v in per_subband.tolist()]
+        )
+
+
+def _sync(device: torch.device) -> None:
+    """CUDA ops queue asynchronously -- without this, time.time() around a GPU op
+    mostly measures how fast the CPU can enqueue work, not how long the GPU took,
+    and the real cost just shows up misattributed to whatever's timed next."""
+    if device.type == "cuda":
+        torch.cuda.synchronize()
 
 
 @torch.no_grad()
@@ -194,33 +212,51 @@ def main():
         optimizer.zero_grad(set_to_none=True)
         accumulated_loss = 0.0
         accumulated_subband = torch.zeros(8)
+        data_sec = fwd_sec = bwd_sec = opt_sec = 0.0
 
         for _ in range(grad_accum_steps):
+            t0 = time.time()
             batch = train_cycle.next()
             mri, ct = batch["mri"].to(device, non_blocking=True), batch["ct"].to(device, non_blocking=True)
+            _sync(device)
+            data_sec += time.time() - t0
 
+            t0 = time.time()
             with autocast_ctx():
                 losses = model.training_losses(mri, ct)
                 loss = losses["loss"] / grad_accum_steps
+            _sync(device)
+            fwd_sec += time.time() - t0
 
+            t0 = time.time()
             scaler.scale(loss).backward()
+            _sync(device)
+            bwd_sec += time.time() - t0
+
             accumulated_loss += losses["loss"].item() / grad_accum_steps
             accumulated_subband += losses["per_subband_mse"].float().cpu() / grad_accum_steps
 
+        t0 = time.time()
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
         scaler.step(optimizer)
         scaler.update()
         scheduler.step()
         ema.update(model)
+        _sync(device)
+        opt_sec += time.time() - t0
 
         global_step += 1
 
         if global_step % log_interval == 0:
             elapsed = time.time() - t_start
             lr = scheduler.get_last_lr()[0]
-            log.info("step %d/%d  loss=%.5f  lr=%.2e  elapsed=%.0fs", global_step, total_steps, accumulated_loss, lr, elapsed)
-            append_log_row(log_file, global_step, "train", accumulated_loss, lr, elapsed, accumulated_subband)
+            log.info(
+                "step %d/%d  loss=%.5f  lr=%.2e  elapsed=%.0fs  |  data=%.2fs fwd=%.2fs bwd=%.2fs opt=%.2fs (this step)",
+                global_step, total_steps, accumulated_loss, lr, elapsed, data_sec, fwd_sec, bwd_sec, opt_sec,
+            )
+            append_log_row(log_file, global_step, "train", accumulated_loss, lr, elapsed, accumulated_subband,
+                            data_sec=data_sec, fwd_sec=fwd_sec, bwd_sec=bwd_sec, opt_sec=opt_sec)
 
         if global_step % val_interval == 0:
             val_loss, val_subband = quick_validation_loss(model, val_cycle, device, val_batches, amp_enabled)

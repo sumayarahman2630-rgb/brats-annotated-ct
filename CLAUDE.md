@@ -257,6 +257,76 @@ is `training.batch_size`/`grad_accum_steps` interaction or lowering
 priority order, since those reduce model capacity/quality rather than
 just trading compute for memory.
 
+**2026-07-15 (round 4) — checkpointing confirmed working (50/100-step smoke
+test, no crash, deliberately interrupted to check `nvidia-smi`), now
+optimizing for speed under a real deadline.** Two things came out of this:
+
+1. **Latent GroupNorm bug found while sizing a smaller model.** `ResBlock3D.
+   out_norm` and `SelfAttention3D.norm` built `nn.GroupNorm(min(num_groups,
+   channels), channels)` directly -- only valid when `channels` happens to be
+   divisible by `num_groups` (true for base_channels=64's `[64,128,256,256]`,
+   NOT guaranteed otherwise: base_channels=48 gives `[48,96,192,192]`, and 56
+   gives `[56,112,224,224]`, neither evenly divisible by 32). Would have
+   crashed immediately on `base_channels` values `_norm_act`'s already-correct
+   fallback logic wasn't being used for. Fixed by extracting that fallback
+   into `_safe_num_groups()` and using it in all three GroupNorm call sites,
+   not just the one `_norm_act` covered. Caught by actually trying
+   `base_channels=48` locally before recommending it, not by inspection.
+
+2. **Dual-GPU (2×T4, confirmed via `nvidia-smi`) is not being pursued right
+   now.** Recommendation: stay single-GPU. Reasoning, not just caution --
+   `DataParallel`/DDP requires multi-process launch, a distributed sampler,
+   correct rank-0-only checkpoint saving, and careful EMA handling across
+   ranks; none of this is implementable *and* verifiable from here (no CUDA
+   GPU on this machine, and DDP bugs are exactly the class of thing that's
+   hard to debug blind). Under a real deadline, the risk of losing hours to a
+   distributed-training bug outweighs the throughput gain, especially since
+   single-GPU levers (below) are lower-risk and available immediately. Revisit
+   DDP later only if single-GPU throughput is still the bottleneck once
+   training is otherwise stable and proven correct.
+
+3. **New default config trades some capacity for speed:**
+   `model.base_channels: 64 -> 48` (69.7M -> 39.2M params, ~56% of original)
+   and `model.use_checkpoint: true -> false` (removes checkpointing's ~20-30%
+   recompute overhead). Sized against the one real data point available: at
+   base_channels=64 with checkpointing OFF, the decoder OOM'd short by exactly
+   1.14 GiB. Channel count scales activation memory ~linearly, so the 25% cut
+   from 64->48 should clear that gap with real margin (~1.14 GiB needed vs. an
+   estimated >2 GiB freed) -- reasoned from the crash's own numbers, not a
+   guess. **Guaranteed-safe fallback if this still OOMs:** set
+   `use_checkpoint: true` back on at base_channels=48 -- strictly safer than
+   the already-confirmed-working base_channels=64 + checkpointing=true
+   combination, since fewer channels can only use less memory, never more.
+   This is the lowest-risk unblock available if the speed-priority config
+   somehow isn't enough.
+4. **Added per-component timing instrumentation** to `train_stage1.py`
+   (`data_sec`/`fwd_sec`/`bwd_sec`/`opt_sec`, `torch.cuda.synchronize()`-gated
+   so the numbers are real, not just CPU-enqueue time) -- logged every step to
+   both the console and the CSV log file. This exists because the 18.3s/step
+   figure couldn't be broken down from here (no GPU) -- rather than guess at a
+   checkpointing-vs-data-loading split, the next real Kaggle run now produces
+   the actual breakdown directly. One thing worth knowing before reading it:
+   `training.grad_accum_steps: 4` means each logged "step" already bundles 4
+   sequential micro-batches (data+forward+backward each), so the reported
+   `data_sec`/`fwd_sec`/`bwd_sec` are *sums across all 4*, not one micro-batch
+   -- divide by 4 for a per-microbatch figure. Lowering `grad_accum_steps`
+   (cwdm's own reference config uses no accumulation at all, i.e.
+   effectively 1) would proportionally cut wall-clock time to reach a given
+   `total_steps`, but also lowers the effective batch size (4 -> fewer),
+   which is a real training-dynamics tradeoff -- left untouched this round
+   since the user asked specifically about `use_checkpoint` and
+   `base_channels`, not `grad_accum_steps`; flagged here as an available
+   extra lever, not applied unilaterally.
+
+**Next smoke test command (no change from before):**
+```
+python -m training.train_stage1 --config configs/stage1_synthrad.yaml --max_steps 100 --max_patients 3
+```
+Watch the console (or `training.log_file`'s new `data_sec`/`fwd_sec`/
+`bwd_sec`/`opt_sec` columns) for the real time breakdown, and `nvidia-smi`
+for peak memory with checkpointing off. If it OOMs, flip `use_checkpoint`
+back to `true` (guaranteed fix, see above) before touching anything else.
+
 ## Repo layout
 
 ```

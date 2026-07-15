@@ -24,7 +24,16 @@ data:
   cache_dir: "/kaggle/working/synthrad_cache"   # preprocessed volumes cached here after first epoch; null to disable
 
 model:
-  base_channels: 64
+  # 2026-07-15 (round 4, speed pass): dropped from 64 -> 48 (39.2M params vs. 69.7M,
+  # ~56% of original capacity -- a real quality tradeoff, not free) specifically to let
+  # use_checkpoint go back to false below without re-OOMing. Sized against the one hard
+  # data point available: at base_channels=64 with checkpointing OFF, the decoder OOM'd
+  # short by exactly 1.14 GiB (13.55/14.56 GiB used). Channel count scales activation
+  # memory ~linearly, and 64->48 is a 25% cut -- comfortable margin over that 1.14 GiB
+  # gap, not a razor's-edge fit. If time/quality priorities shift back, restore 64 (and
+  # use_checkpoint: true, already proven safe at 64) -- nothing else in the repo assumes
+  # a specific base_channels value.
+  base_channels: 48
   channel_mult: [1, 2, 4, 4]          # 3 downsamples -> spatial_multiple above must be 2 * 2^3 = 16
   num_res_blocks: 2
   # Self-attention runs at levels whose downsample factor (2^level, level 0 = right
@@ -50,11 +59,15 @@ model:
   # the high-resolution decoder levels where post-skip-concat channel counts spike
   # (the 2026-07-15 GroupNorm OOM was there specifically; GroupNorm doesn't get
   # autocast's fp16 memory savings, so this is the lever that actually addresses it).
-  # Applies network-wide (encoder+bottleneck+decoder), not just the decoder --
-  # strictly more memory saved for the same one flag, no reason to scope it narrower.
-  # Only active during model.train() -- no-op during eval()/sample(), since there's
-  # no backward pass to save memory on there.
-  use_checkpoint: true
+  # Applies network-wide (encoder+bottleneck+decoder) when on, not just the decoder.
+  # Turned OFF here (round 4, speed pass) to remove that recompute overhead for
+  # smoke-test/early-training speed, compensated by the base_channels cut above
+  # instead. GUARANTEED-SAFE FALLBACK if this config still OOMs: set this back to
+  # true. use_checkpoint=true at base_channels=48 is strictly safer than the already-
+  # confirmed-working use_checkpoint=true at base_channels=64 (fewer channels can
+  # only use less memory, never more) -- flipping this one line is the lowest-risk
+  # unblock available if the current settings somehow aren't enough.
+  use_checkpoint: false
 
 diffusion:
   timesteps: 1000

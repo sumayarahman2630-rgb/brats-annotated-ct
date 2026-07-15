@@ -55,11 +55,19 @@ def timestep_embedding(timesteps: torch.Tensor, dim: int, max_period: int = 1000
     return embedding
 
 
-def _norm_act(num_groups: int, channels: int) -> nn.Sequential:
+def _safe_num_groups(num_groups: int, channels: int) -> int:
+    """GroupNorm requires channels % groups == 0. num_groups=32 only divides
+    channel counts that happen to be multiples of 32 (true for base_channels=64's
+    [64,128,256,256], NOT guaranteed for other base_channels choices) -- fall back
+    to the largest divisor <= num_groups instead of hardcoding an assumption."""
     groups = min(num_groups, channels)
     while channels % groups != 0:
         groups -= 1
-    return nn.Sequential(nn.GroupNorm(groups, channels), nn.SiLU())
+    return groups
+
+
+def _norm_act(num_groups: int, channels: int) -> nn.Sequential:
+    return nn.Sequential(nn.GroupNorm(_safe_num_groups(num_groups, channels), channels), nn.SiLU())
 
 
 class ResBlock3D(nn.Module):
@@ -70,7 +78,7 @@ class ResBlock3D(nn.Module):
 
         self.emb_proj = nn.Sequential(nn.SiLU(), nn.Linear(emb_dim, 2 * out_channels))
 
-        self.out_norm = nn.GroupNorm(min(num_groups, out_channels), out_channels)
+        self.out_norm = nn.GroupNorm(_safe_num_groups(num_groups, out_channels), out_channels)
         self.out_act_drop = nn.Sequential(nn.SiLU(), nn.Dropout(dropout))
         self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1)
         nn.init.zeros_(self.conv2.weight)
@@ -106,7 +114,7 @@ class SelfAttention3D(nn.Module):
     def __init__(self, channels: int, num_heads: int = 4, num_groups: int = 32):
         super().__init__()
         self.num_heads = num_heads
-        self.norm = nn.GroupNorm(min(num_groups, channels), channels)
+        self.norm = nn.GroupNorm(_safe_num_groups(num_groups, channels), channels)
         self.qkv = nn.Conv3d(channels, 3 * channels, kernel_size=1)
         self.proj = nn.Conv3d(channels, channels, kernel_size=1)
         nn.init.zeros_(self.proj.weight)
