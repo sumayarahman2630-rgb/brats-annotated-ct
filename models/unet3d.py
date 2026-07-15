@@ -218,9 +218,23 @@ class UNet3D(nn.Module):
         num_heads: int = 4,
         num_groups: int = 32,
         dropout: float = 0.0,
-        use_checkpoint: bool = False,
+        use_checkpoint: bool | tuple[int, ...] = False,
     ):
+        """use_checkpoint: bool applies (or not) to every level uniformly. A
+        tuple of resolution factors (same convention as attention_resolutions)
+        instead scopes checkpointing to only those levels -- useful for
+        keeping it only where memory pressure actually requires it (the
+        highest-resolution levels, where skip-concat spikes channel count)
+        while skipping the recompute overhead at cheap coarse/bottleneck
+        levels that never needed the memory tradeoff in the first place.
+        """
         super().__init__()
+
+        def checkpoint_here(resolution_factor: int) -> bool:
+            if isinstance(use_checkpoint, bool):
+                return use_checkpoint
+            return resolution_factor in use_checkpoint
+
         emb_dim = base_channels * 4
         self.base_channels = base_channels
         self.time_mlp = nn.Sequential(
@@ -246,7 +260,7 @@ class UNet3D(nn.Module):
             level_blocks = nn.ModuleList()
             for _ in range(num_res_blocks):
                 use_attn = resolution_factor in attention_resolutions
-                level_blocks.append(ResAttnBlock(ch, out_ch, emb_dim, num_groups, dropout, use_attn, num_heads, use_checkpoint=use_checkpoint))
+                level_blocks.append(ResAttnBlock(ch, out_ch, emb_dim, num_groups, dropout, use_attn, num_heads, use_checkpoint=checkpoint_here(resolution_factor)))
                 ch = out_ch
                 skip_channels.append(ch)
             self.down_blocks.append(level_blocks)
@@ -256,9 +270,9 @@ class UNet3D(nn.Module):
                 resolution_factor *= 2
 
         # --- bottleneck ---
-        self.mid_block1 = ResBlock3D(ch, ch, emb_dim, num_groups, dropout, use_checkpoint=use_checkpoint)
+        self.mid_block1 = ResBlock3D(ch, ch, emb_dim, num_groups, dropout, use_checkpoint=checkpoint_here(resolution_factor))
         self.mid_attn = SelfAttention3D(ch, num_heads, num_groups)
-        self.mid_block2 = ResBlock3D(ch, ch, emb_dim, num_groups, dropout, use_checkpoint=use_checkpoint)
+        self.mid_block2 = ResBlock3D(ch, ch, emb_dim, num_groups, dropout, use_checkpoint=checkpoint_here(resolution_factor))
 
         # --- decoder: mirrors the encoder, consuming skip_channels in LIFO order ---
         self.up_blocks = nn.ModuleList()    # ModuleList[level] = ModuleList[ResAttnBlock], levels in decoder order (coarse -> fine)
@@ -270,7 +284,7 @@ class UNet3D(nn.Module):
             for _ in range(num_res_blocks + 1):
                 skip_ch = skip_channels.pop()
                 use_attn = resolution_factor in attention_resolutions
-                level_blocks.append(ResAttnBlock(ch + skip_ch, out_ch, emb_dim, num_groups, dropout, use_attn, num_heads, use_checkpoint=use_checkpoint))
+                level_blocks.append(ResAttnBlock(ch + skip_ch, out_ch, emb_dim, num_groups, dropout, use_attn, num_heads, use_checkpoint=checkpoint_here(resolution_factor)))
                 ch = out_ch
             self.up_blocks.append(level_blocks)
             if level != 0:

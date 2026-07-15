@@ -55,46 +55,85 @@ model:
   dropout: 0.0
   # Activation checkpointing (torch.utils.checkpoint): recomputes each ResBlock3D's
   # forward pass during backward instead of keeping every intermediate activation
-  # around -- trades ~20-30% more compute time for a large memory cut, especially at
-  # the high-resolution decoder levels where post-skip-concat channel counts spike
+  # around -- trades compute time for a large memory cut, especially at the
+  # high-resolution decoder levels where post-skip-concat channel counts spike
   # (the 2026-07-15 GroupNorm OOM was there specifically; GroupNorm doesn't get
   # autocast's fp16 memory savings, so this is the lever that actually addresses it).
-  # Applies network-wide (encoder+bottleneck+decoder) when on, not just the decoder.
-  # Turned OFF here (round 4, speed pass) to remove that recompute overhead for
-  # smoke-test/early-training speed, compensated by the base_channels cut above
-  # instead. GUARANTEED-SAFE FALLBACK if this config still OOMs: set this back to
-  # true. use_checkpoint=true at base_channels=48 is strictly safer than the already-
-  # confirmed-working use_checkpoint=true at base_channels=64 (fewer channels can
-  # only use less memory, never more) -- flipping this one line is the lowest-risk
-  # unblock available if the current settings somehow aren't enough.
-  use_checkpoint: false
+  #
+  # 2026-07-15 (round 5, deadline pass): confirmed WORKING on Kaggle at
+  # base_channels=48 with use_checkpoint=true (50/100-step smoke test, no OOM,
+  # 15.34s/accumulated-step). Kept ON here -- it's the confirmed-safe setting;
+  # the real speed win tonight comes from training.grad_accum_steps below
+  # instead (a change needing no further GPU verification at all, unlike
+  # anything here). GUARANTEED-SAFE FALLBACK if memory pressure ever comes
+  # back: this combination (checkpoint=true, base_channels=48) is what to
+  # fall back to first.
+  #
+  # OPTIONAL / UNVERIFIED experiment, only if there's time to spare: instead
+  # of `true` (checkpoint every level), use_checkpoint also accepts a list of
+  # resolution factors, same convention as attention_resolutions above, e.g.
+  # `use_checkpoint: [1, 2]` checkpoints ONLY the two finest levels (where the
+  # original OOM actually happened) and skips it at the cheap coarse/bottleneck
+  # levels (factors 4, 8) that never needed the memory tradeoff -- profiling
+  # showed backward (checkpoint recompute) dominant at 64% of step time, and
+  # this could cut some of that without reopening the OOM, since it only
+  # *removes* checkpointing from levels that were never the memory problem.
+  # Verified numerically identical to full checkpointing on CPU (same
+  # gradients), but the actual time savings on a real T4 is unverified --
+  # test with `--max_steps 20` first before trusting it with the full run.
+  use_checkpoint: true
 
 diffusion:
-  timesteps: 1000
+  # timesteps: 1000 -> 250 (round 5, deadline pass). With a training budget of a
+  # few thousand steps total, T=1000 means most individual noise levels get only
+  # a handful of gradient updates each (steps spread thin across 1000 buckets).
+  # Dropping to 250 gives ~4x denser coverage per noise level for the same total
+  # step count -- doesn't change wall-clock speed at all (same architecture, same
+  # compute per step), just changes what's being learned to fit the available
+  # step budget. Not needed once total_steps is back in the tens of thousands+.
+  timesteps: 250
   noise_schedule: "linear"
   beta_start: 0.0001
   beta_end: 0.02
   predict: "epsilon"
   subband_loss_weights: [1, 1, 1, 1, 1, 1, 1, 1]   # LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH
-  ddim_steps: 100                     # sampling steps for eval-time preview and Stage 2 inference
+  ddim_steps: 30                      # dropped from 100 -> 30 (round 5): faster Stage 2 generation to cover more BraTS patients in the remaining time budget; run_stage2_brats.py's --num_steps overrides this per-run without editing the file
   ddim_eta: 0.0                       # 0 = deterministic DDIM (fast); 1 = stochastic, approximates ancestral DDPM
 
 training:
   batch_size: 1                       # full 3D volumes; increase only if patch_size is set and VRAM allows
-  grad_accum_steps: 4                 # effective batch size = batch_size * grad_accum_steps
+  # grad_accum_steps: 4 -> 1 (round 5, deadline pass). THE speed lever for
+  # tonight: this doesn't touch per-microbatch memory at all (already proven
+  # safe at grad_accum=4, so grad_accum=1 can only use the same or less peak
+  # memory -- zero additional OOM risk, no GPU retest needed) but gives ~3.8x
+  # more optimizer weight updates for the same wall-clock training time, since
+  # optimizer.step() now runs every microbatch instead of every 4th. Matches
+  # cwdm's own reference config, which uses no gradient accumulation at all
+  # (effective batch=1) successfully. The tradeoff is noisier per-step gradients
+  # (batch=1 instead of averaged batch=4) -- already guarded by grad_clip_norm
+  # and AMP's adaptive GradScaler below, both already in place. Revert to 4 (or
+  # higher) once back on a multi-day training budget, for smoother gradients.
+  grad_accum_steps: 1
   lr: 0.0001
   weight_decay: 0.0
   optimizer: "adamw"
   lr_schedule: "cosine"                # constant | cosine | linear_warmup_cosine
-  warmup_steps: 1000
-  total_steps: 200000
+  # warmup_steps/total_steps (round 5): sized to the real ~4.0s/step measured
+  # after grad_accum_steps=1 (data+fwd+bwd per microbatch + opt overhead), for a
+  # ~6.5 hour training window. This is a PLANNING estimate, not a hard target --
+  # training is checkpointed every checkpoint_interval steps regardless, so it's
+  # fine (and expected) to interrupt before reaching total_steps once the
+  # training time budget is up and move on to Stage 2 with whatever checkpoint
+  # exists then. Restore to 200000 (and a longer warmup) for a real full run.
+  warmup_steps: 150
+  total_steps: 5500
   ema_decay: 0.9999
   amp: true                            # mixed precision -- roughly halves VRAM use and speeds up training on Kaggle GPUs
   grad_clip_norm: 1.0
-  log_interval: 50                     # steps between progress-log-file writes
-  val_interval: 1000                   # steps between quick validation-loss checks (no full sampling, just loss)
+  log_interval: 25                     # steps between progress-log-file writes
+  val_interval: 250                    # round 5: shortened from 1000 to match the smaller total_steps -- still get periodic readouts within the run
   val_batches: 5                       # number of val batches averaged per validation check
-  checkpoint_interval: 1000            # steps between checkpoint saves (not epochs -- a full-dataset epoch may be long)
+  checkpoint_interval: 250             # round 5: shortened from 1000 -- ~22 checkpoints across the training window, so interrupting at any point (deadline permitting) still has a recent checkpoint to run Stage 2 against
   keep_last_n_checkpoints: 3           # older numbered checkpoints are pruned; ckpt_latest.pt always kept
   log_file: "/kaggle/working/logs/stage1_train_log.csv"
 

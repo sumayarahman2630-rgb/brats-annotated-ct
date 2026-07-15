@@ -472,6 +472,46 @@ real paths, and confirm the patient counts look right (hundreds for
 SynthRAD2023 brain, ~370 for BraTS2020 training) before kicking off
 training or a full Stage 2 cohort run.
 
+## 2026-07-15 deadline night (round 5) — demo push, 3am deadline
+
+Goal changed for tonight only: a demo-able synthetic CT from BraTS by 3am,
+not production quality/full convergence -- explicitly accepted as
+out-of-reach in one night. Config reflects this (`configs/stage1_synthrad.
+yaml`): `grad_accum_steps: 1` (was 4 -- ~3.8x more weight updates for the
+same wall-clock, zero extra OOM risk since it doesn't touch per-microbatch
+memory at all), `diffusion.timesteps: 250` (was 1000 -- denser per-noise-
+level gradient coverage when total_steps is only in the thousands),
+`ddim_steps: 30` (was 100 -- faster Stage 2 generation), `total_steps:
+5500`/`checkpoint_interval: 250` (planning estimates from the real
+15.34s/accumulated-step measurement, not hard targets -- training is
+checkpointed regularly regardless, so it's fine and expected to interrupt
+once the training time budget is up rather than waiting for exactly 5500).
+
+**Realistic expectation, stated plainly:** a few thousand steps is a low
+budget for any diffusion model. Strong MRI conditioning and wavelet-domain
+training (the LLL subband -- coarse structure -- typically converges faster
+than the 7 detail subbands) make some visible brain-shaped structure
+plausible sooner than for unconditional generation, but expect blur/softness
+and likely no fine bone/tissue detail. If it comes out looking like noise,
+the honest fallback framing is still legitimate: demo the *pipeline* (MRI in
+-> checkpointed training -> synthetic CT + tumor mask out, fully resumable,
+correctly paired) as complete and correct engineering, independent of
+tonight's image quality, which is a compute-budget problem, not a code
+problem. Do a cheap mid-run sanity check (~halfway through the training
+window: read the loss curve in the CSV log, optionally a 1-2-patient Stage 2
+preview at ddim_steps~10 on the checkpoint-so-far) specifically so a dead-end
+is caught with enough runway left to react, not discovered at hour 8.
+
+**Optional, unverified lever if there's time to spare:** `model.
+use_checkpoint` also accepts a list of resolution factors (e.g. `[1, 2]`) to
+scope checkpointing to only the levels that actually needed it -- see the
+comment above that config key. Verified numerically identical to full
+checkpointing on CPU; actual speed gain on a real T4 is unverified. Test
+with `--max_steps 20` before trusting it with the full run.
+
+Dual-GPU (2xT4) explicitly not pursued tonight -- see the round-4 entry
+above; that reasoning is unchanged and is doubly true with a hard deadline.
+
 ## Not yet done / explicitly out of scope for today
 
 - Dice-on-downstream-segmentation evaluation (med-ddpm's practice) — worth
