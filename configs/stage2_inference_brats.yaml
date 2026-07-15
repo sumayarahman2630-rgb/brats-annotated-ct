@@ -13,6 +13,14 @@ output_dir: "/kaggle/working/synthetic_ct_dataset"
 
 checkpoint_dir: null   # override; defaults to stage1_config's checkpoint.working_dir + extra_resume_dirs
 num_steps: null        # override DDIM sampling steps; defaults to stage1_config's diffusion.ddim_steps
-use_ema: true
+# 2026-07-16: false for tonight's checkpoint specifically. ema_decay=0.9999
+# has a ~10,000-step time constant; after only 5500 training steps, the EMA
+# weights are still 0.9999^5500 = 57.7% the original random initialization
+# (confirmed: val_loss was measured on the raw model, not EMA, which is why
+# it looked good while EMA-weight sampling produced pure noise). Raw weights
+# are the correct choice until training runs long enough (tens of thousands
+# of steps at this decay) for EMA to actually converge -- flip back to true
+# if this checkpoint is ever continued for much longer training.
+use_ema: false
 overwrite: false
 limit: null             # e.g. 5, to smoke-test generation on a handful of patients before running the full cohort

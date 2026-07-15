@@ -142,6 +142,44 @@ sampling per BraTS volume would make a full-cohort run impractical.
 
 ## Known bugs fixed
 
+**2026-07-16 (round 6) — Stage 2 sampled pure noise despite val_loss=0.01293
+being good.** The first real inference run (5 BraTS patients, ddim_steps=30)
+produced static/noise for the synthetic CT while the tumor mask overlay was
+correctly placed -- meaning the mask-copy path was fine but the model's
+actual output was garbage, which didn't match the good validation loss from
+training and needed fast root-causing with ~4 hours left before the
+deadline.
+
+**Root cause: EMA decay was miscalibrated for a short run.** `training.
+ema_decay: 0.9999` gives the EMA weights a ~10,000-step time constant
+(1/(1-0.9999)) -- roughly how long it takes the EMA to substantially forget
+its starting point. `EMA(model, ...)` is constructed right after the
+model's *random* initialization, so that starting point is pure noise.
+Tonight's run only did 5,500 steps (round 5's deadline-night total_steps),
+so `0.9999^5500 = 57.7%` of the EMA checkpoint's weights were **still the
+original random initialization** -- confirmed by direct calculation, no
+GPU needed. Meanwhile `training/train_stage1.py`'s validation loss is
+computed on the *raw* (non-EMA) model weights (`quick_validation_loss`
+calls the live model directly), which had genuinely learned plenty in
+5,500 steps -- hence good val_loss, garbage EMA-weight samples. Two
+different sets of weights being implicitly compared is exactly why this
+looked contradictory.
+
+**Fix:** `configs/stage2_inference_brats.yaml`'s `use_ema` default changed
+`true -> false` for this checkpoint specifically -- `training/checkpoint.
+py`'s `load_checkpoint` always loads the raw trained weights into `model`
+first (`model.load_state_dict(payload["model_state"])`); `run_stage2_brats.
+py` only overwrites them with the contaminated EMA weights if `use_ema` is
+true, so setting it false uses exactly the weights val_loss already
+validated as good. No retraining needed -- this is purely an inference-time
+weight-selection fix. `--no_ema` also works as a one-off CLI override
+without editing the config. Revisit `use_ema: true` only if this checkpoint
+is ever continued for training well beyond ema_decay's ~10,000-step time
+constant (tens of thousands more steps), at which point EMA would actually
+have converged and be worth using again (EMA sampling is normally *better*
+than raw weights once it's had time to converge -- this bug is specific to
+short runs, not a reason to distrust EMA in general).
+
 **2026-07-16 — BraTS Stage 2 input was missing Stage 1's brain-crop step
 (found before Stage 1 training even finished, by re-reading both
 preprocessing paths side by side rather than waiting to see bad output).**
