@@ -1,0 +1,11 @@
+.claude/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+checkpoints/
+logs/
+*.npz
+*.npy
+.DS_Store
+kaggle_working/
+/kaggle/
