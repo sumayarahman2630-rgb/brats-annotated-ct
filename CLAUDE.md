@@ -17,19 +17,44 @@ code. Keep it updated as work progresses — status, not just plan.
    the project (annotated synthetic CT for tumor-region work, where real
    annotated CT is scarce).
 
-## Kaggle dataset paths (as given by the user, 2026-07-15)
+## Kaggle dataset paths (FINAL, confirmed 2026-07-15 — do not re-derive)
 
+**SynthRAD2023** — per-patient folders directly under `Task1/brain`:
 ```
-awsaf49            -> /kaggle/input/datasets/awsaf49            -> brats2020-training-data
-fd7akxj65n5yjxwds  -> /kaggle/input/datasets/fd7akxj65n5yjxwds  -> synthrad-2023
+/kaggle/input/datasets/fd7akxj65n5yjxwds/synthrad-2023/Task1/brain/<patient_id>/
+    ct.nii, mask.nii, mr.nii
 ```
-These are the values that belong in `configs/stage1_synthrad.yaml` /
-`data.synthrad_root` and in the Stage 2 script's `--brats_root` on Kaggle.
-Exact per-patient folder layout inside each hasn't been inspected from this
-machine (no Kaggle filesystem access here) — both loaders are written to
-*discover* patient folders by pattern rather than assume a hardcoded nesting,
-and both log what they found on first run so a bad path fails loudly instead
-of silently loading zero patients.
+`<patient_id>` looks like `1BA001` — not numeric-only, so patient ID is taken
+as the folder's basename with no ID-format assumption (see
+`discover_synthrad_patients` in `data/loaders_synthrad.py`). This exact path
+is now hardcoded as `data.synthrad_root` in `configs/stage1_synthrad.yaml`,
+with `data.region: null` since the path is already scoped to brain (no
+filtering needed).
+
+**BraTS2020** — use `awsaf49/brats20-dataset-training-validation`, **not**
+`awsaf49/brats2020-training-data`. The first is the original per-patient
+NIfTI release; the second turned out to be a pre-sliced 2D `.h5` dataset
+(built for slice-wise segmentation training), which doesn't work for this
+project's full-volume 3D pipeline — `data/loaders_brats.py` was always
+written for full NIfTI volumes, so nothing there needed to change once the
+correct dataset was identified, only the path. Use **only** the
+TrainingData half; ValidationData has no `seg.nii`, so it can't be paired:
+```
+/kaggle/input/datasets/awsaf49/brats20-dataset-training-validation/BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData/<patient_id>/
+    <patient_id>_t1.nii   -> MRI input (ignore _t1ce, _t2, _flair)
+    <patient_id>_seg.nii  -> tumor mask
+```
+`<patient_id>` looks like `BraTS20_Training_083` — `discover_brats_patients`
+extracts the ID as everything before `_t1`/`_seg` in the filename, so this
+works regardless of ID format. This exact path is now hardcoded as
+`brats_root` in `configs/stage2_inference_brats.yaml`.
+
+Both loaders were verified against synthetic directories built to mirror
+these exact layouts and filenames (bare `.nii`, both ID conventions) — see
+Status below. Both still discover patients by pattern rather than a
+hardcoded per-file assumption beyond the confirmed root paths, and both log
+what they found on first run so a wrong path fails loudly instead of
+silently loading zero patients.
 
 ## Architecture decision record
 
@@ -84,7 +109,8 @@ sampling per BraTS volume would make a full-cohort run impractical.
 ## Repo layout
 
 ```
-configs/stage1_synthrad.yaml   all hyperparameters — nothing hardcoded in code
+configs/stage1_synthrad.yaml        all Stage 1 hyperparameters — nothing hardcoded in code
+configs/stage2_inference_brats.yaml Stage 2 paths/settings (brats_root, output_dir, etc.) — CLI flags override for one-off runs
 data/
   preprocessing.py             HU clip/normalize, resample, brain-mask, patch/pad —
                                 shared by both the SynthRAD loader and the BraTS loader
@@ -188,6 +214,7 @@ independently for this codebase, for academic-defense originality.
 | data/loaders_synthrad.py | done |
 | models/wavelet_transform.py, unet3d.py, stage1_mri2ct_ddpm.py | done |
 | configs/stage1_synthrad.yaml | done |
+| configs/stage2_inference_brats.yaml | done |
 | training/ema.py, checkpoint.py, train_stage1.py | done |
 | data/loaders_brats.py | done |
 | inference/run_stage2_brats.py | done |
@@ -210,15 +237,19 @@ from this machine) and not on GPU. What's verified:
 
 **What is NOT yet verified**, because this machine has no GPU and no
 access to the real Kaggle datasets: actual training dynamics/loss
-convergence on real data, real memory/time budget on a Kaggle GPU at the
-configured model size (base_channels=64, channel_mult=[1,2,4,4]), and
-whether `discover_synthrad_patients`/`discover_brats_patients` correctly
-parse the *real* Kaggle-hosted folder layouts (both were written to be
-pattern-robust rather than assume an exact layout, precisely because that
-couldn't be inspected from here -- **run a quick sanity check on Kaggle
-first**: import the loader, call `discover_synthrad_patients(...)` /
-`discover_brats_patients(...)` on the real paths, and confirm the patient
-counts look right before kicking off a long training run).
+convergence on real data, and real memory/time budget on a Kaggle GPU at
+the configured model size (base_channels=64, channel_mult=[1,2,4,4]).
+Dataset paths and per-patient file layout are now confirmed (see "Kaggle
+dataset paths" above) and both discovery functions were verified against
+synthetic directories mirroring those exact confirmed layouts and filename
+conventions — but that's still not the same as running against the real
+files, which can have quirks a mirror doesn't reproduce (a handful of
+malformed/renamed patients, unexpected extra files, etc.). **Still worth a
+quick sanity check on Kaggle before a long run**: import the loader, call
+`discover_synthrad_patients(...)` / `discover_brats_patients(...)` on the
+real paths, and confirm the patient counts look right (hundreds for
+SynthRAD2023 brain, ~370 for BraTS2020 training) before kicking off
+training or a full Stage 2 cohort run.
 
 ## Not yet done / explicitly out of scope for today
 

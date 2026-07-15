@@ -2,10 +2,12 @@
 Stage 1 model, paired with its tumor mask. This is the deliverable dataset.
 
 Run as:
-    python -m inference.run_stage2_brats \
-        --stage1_config configs/stage1_synthrad.yaml \
-        --brats_root /kaggle/input/datasets/awsaf49/brats2020-training-data \
-        --output_dir /kaggle/working/synthetic_ct_dataset
+    python -m inference.run_stage2_brats --config configs/stage2_inference_brats.yaml
+
+All settings (brats_root, output_dir, stage1_config, etc.) come from that
+config file by default -- CLI flags below override individual values for
+one-off runs (e.g. `--limit 5` to smoke-test before committing to the full
+cohort) without editing the file.
 
 Resumable by design: before generating a patient, checks whether its output
 CT already exists in output_dir and skips it if so (pass --overwrite to
@@ -47,16 +49,48 @@ MANIFEST_FIELDS = ["patient_id", "status", "ct_path", "mask_path", "error", "ela
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--stage1_config", type=str, default="configs/stage1_synthrad.yaml")
-    parser.add_argument("--brats_root", type=str, required=True)
-    parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument("--config", type=str, default="configs/stage2_inference_brats.yaml", help="Stage 2 config; see that file for all settings.")
+    parser.add_argument("--stage1_config", type=str, default=None, help="Override stage1_config from --config.")
+    parser.add_argument("--brats_root", type=str, default=None, help="Override brats_root from --config.")
+    parser.add_argument("--output_dir", type=str, default=None, help="Override output_dir from --config.")
     parser.add_argument("--checkpoint_dir", type=str, default=None, help="Override checkpoint search dir(s); defaults to the stage1 config's checkpoint section.")
     parser.add_argument("--num_steps", type=int, default=None, help="DDIM sampling steps; defaults to diffusion.ddim_steps in the config.")
-    parser.add_argument("--use_ema", action="store_true", default=True)
+    parser.add_argument("--use_ema", action="store_true", default=None)
     parser.add_argument("--no_ema", dest="use_ema", action="store_false")
-    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--overwrite", action="store_true", default=None)
     parser.add_argument("--limit", type=int, default=None, help="Process only the first N patients (for a quick test run).")
     return parser.parse_args()
+
+
+def resolve_settings(args) -> dict:
+    """CLI flags override the --config file's values; the config file
+    supplies everything not passed on the command line."""
+    stage2_cfg = {}
+    if os.path.exists(args.config):
+        with open(args.config) as f:
+            stage2_cfg = yaml.safe_load(f) or {}
+    else:
+        log.warning("Stage 2 config %s not found -- relying entirely on CLI flags.", args.config)
+
+    def pick(cli_val, key, default=None):
+        return cli_val if cli_val is not None else stage2_cfg.get(key, default)
+
+    settings = {
+        "stage1_config": pick(args.stage1_config, "stage1_config", "configs/stage1_synthrad.yaml"),
+        "brats_root": pick(args.brats_root, "brats_root"),
+        "output_dir": pick(args.output_dir, "output_dir"),
+        "checkpoint_dir": pick(args.checkpoint_dir, "checkpoint_dir"),
+        "num_steps": pick(args.num_steps, "num_steps"),
+        "use_ema": pick(args.use_ema, "use_ema", True),
+        "overwrite": pick(args.overwrite, "overwrite", False),
+        "limit": pick(args.limit, "limit"),
+    }
+    if not settings["brats_root"] or not settings["output_dir"]:
+        raise RuntimeError(
+            "brats_root and output_dir must be set either in --config "
+            f"({args.config}) or passed as --brats_root / --output_dir."
+        )
+    return settings
 
 
 def init_manifest(path: str) -> None:
@@ -94,8 +128,9 @@ def process_seg_mask(seg_path: str, target_spacing, original_shape, reference_im
 
 def main():
     args = parse_args()
+    settings = resolve_settings(args)
 
-    with open(args.stage1_config) as f:
+    with open(settings["stage1_config"]) as f:
         config = yaml.safe_load(f)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -104,7 +139,7 @@ def main():
     model = build_stage1_model(config).to(device)
     ema = EMA(model, decay=config["training"].get("ema_decay", 0.9999))
 
-    search_dirs = [args.checkpoint_dir] if args.checkpoint_dir else (
+    search_dirs = [settings["checkpoint_dir"]] if settings["checkpoint_dir"] else (
         [config["checkpoint"]["working_dir"]] + list(config["checkpoint"].get("extra_resume_dirs", []))
     )
     ckpt_path = find_latest_checkpoint(search_dirs)
@@ -116,7 +151,7 @@ def main():
     step, _extra = load_checkpoint(ckpt_path, model, ema, optimizer=None, scheduler=None, map_location=device.type)
     log.info("Loaded Stage 1 checkpoint %s (step %d)", ckpt_path, step)
 
-    if args.use_ema:
+    if settings["use_ema"]:
         ema.copy_to(model)
         log.info("Using EMA weights for generation.")
     else:
@@ -127,22 +162,23 @@ def main():
     target_spacing = tuple(data_cfg.get("target_spacing", (1.0, 1.0, 1.0)))
     spatial_multiple = data_cfg.get("spatial_multiple", 16)
     ct_clip_range = tuple(data_cfg.get("ct_clip_range", (-1000.0, 3000.0)))
-    num_steps = args.num_steps or config["diffusion"].get("ddim_steps", 100)
+    num_steps = settings["num_steps"] or config["diffusion"].get("ddim_steps", 100)
 
-    patients = discover_brats_patients(args.brats_root)
-    if args.limit:
-        patients = patients[: args.limit]
+    patients = discover_brats_patients(settings["brats_root"])
+    if settings["limit"]:
+        patients = patients[: settings["limit"]]
     if not patients:
-        raise RuntimeError(f"No BraTS patients discovered under {args.brats_root!r}.")
+        raise RuntimeError(f"No BraTS patients discovered under {settings['brats_root']!r}.")
 
     dataset = BraTSVolumeDataset(patients, target_spacing=target_spacing, spatial_multiple=spatial_multiple)
 
-    manifest_path = os.path.join(args.output_dir, "manifest.csv")
+    output_dir = settings["output_dir"]
+    manifest_path = os.path.join(output_dir, "manifest.csv")
     init_manifest(manifest_path)
 
     n_success, n_failed, n_skipped = 0, 0, 0
     for i, patient in enumerate(patients):
-        if not args.overwrite and already_done(args.output_dir, patient.patient_id):
+        if not settings["overwrite"] and already_done(output_dir, patient.patient_id):
             log.info("[%d/%d] %s already generated, skipping", i + 1, len(patients), patient.patient_id)
             n_skipped += 1
             continue
@@ -159,12 +195,12 @@ def main():
             ct_pred_norm = pad_or_crop_to_shape(ct_pred_norm, item["original_shape"], pad_value=-1.0)
             ct_hu = denormalize_ct(ct_pred_norm, *ct_clip_range)
 
-            ct_out_path = os.path.join(args.output_dir, patient.patient_id, "synthetic_ct.nii.gz")
+            ct_out_path = os.path.join(output_dir, patient.patient_id, "synthetic_ct.nii.gz")
             write_hu_image(ct_hu, item["reference_image"], ct_out_path)
 
             mask_out_path = ""
             if patient.seg_path is not None:
-                mask_out_path = os.path.join(args.output_dir, patient.patient_id, "tumor_mask.nii.gz")
+                mask_out_path = os.path.join(output_dir, patient.patient_id, "tumor_mask.nii.gz")
                 process_seg_mask(patient.seg_path, target_spacing, item["original_shape"], item["reference_image"], mask_out_path)
 
             elapsed = time.time() - t0

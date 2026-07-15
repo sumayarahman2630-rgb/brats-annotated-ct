@@ -1,0 +1,18 @@
+# Stage 2 (synthetic CT generation from BraTS T1 volumes) config.
+# Confirmed exact Kaggle layout (2026-07-15): per-patient folders under
+# MICCAI_BraTS2020_TrainingData, each containing <patient_id>_t1.nii and
+# <patient_id>_seg.nii (plus _t1ce/_t2/_flair, which are ignored -- only
+# t1 and seg are used). Use ONLY the TrainingData half of this dataset;
+# ValidationData has no seg.nii, so it can't be paired. See CLAUDE.md's
+# "Kaggle dataset paths" section -- this is final, don't re-derive it.
+
+stage1_config: "configs/stage1_synthrad.yaml"   # reused for model architecture + checkpoint location + preprocessing params
+
+brats_root: "/kaggle/input/datasets/awsaf49/brats20-dataset-training-validation/BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData"
+output_dir: "/kaggle/working/synthetic_ct_dataset"
+
+checkpoint_dir: null   # override; defaults to stage1_config's checkpoint.working_dir + extra_resume_dirs
+num_steps: null        # override DDIM sampling steps; defaults to stage1_config's diffusion.ddim_steps
+use_ema: true
+overwrite: false
+limit: null             # e.g. 5, to smoke-test generation on a handful of patients before running the full cohort

@@ -6,10 +6,12 @@
 seed: 42
 
 data:
-  # Kaggle input path from the 2026-07-15 session:
-  # Folder: fd7akxj65n5yjxwds -> /kaggle/input/datasets/fd7akxj65n5yjxwds -> synthrad-2023
-  synthrad_root: "/kaggle/input/datasets/fd7akxj65n5yjxwds/synthrad-2023"
-  region: "brain"                    # SynthRAD2023 also has pelvis; only brain matches the BraTS pairing goal
+  # Confirmed exact Kaggle layout (2026-07-15): per-patient folders directly
+  # under Task1/brain, each containing ct.nii, mask.nii, mr.nii. See
+  # CLAUDE.md's "Kaggle dataset paths" section -- this is final, don't
+  # re-derive it from the dataset root.
+  synthrad_root: "/kaggle/input/datasets/fd7akxj65n5yjxwds/synthrad-2023/Task1/brain"
+  region: null                       # path above is already scoped to Task1/brain; no filtering needed
   target_spacing: [1.0, 1.0, 1.0]     # mm, matches SynthRAD2023's official brain preprocessing
   ct_clip_range: [-1000.0, 3000.0]    # HU clip range before normalization to [-1, 1]
   match_brats_domain: true            # zero non-brain voxels in both MR and CT -- see CLAUDE.md domain-gap note
