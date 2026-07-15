@@ -202,12 +202,21 @@ def build_synthrad_dataloaders(config: dict, seed: int = 0) -> tuple[DataLoader,
     patch_size = data_cfg.get("patch_size")
     patch_size = tuple(patch_size) if patch_size else None
 
+    batch_size = config["training"].get("batch_size", 1)
+    if batch_size > 1 and patch_size is None:
+        raise ValueError(
+            "training.batch_size > 1 requires data.patch_size to be set: without patching, "
+            "different patients crop to different bounding-box shapes and cannot be stacked "
+            "into a batch. Either set patch_size or keep batch_size=1 (use training.grad_accum_steps "
+            "to increase the effective batch size instead)."
+        )
+
     train_ds = SynthRADBrainDataset(train_patients, patch_size=patch_size, **common_kwargs)
     val_ds = SynthRADBrainDataset(val_patients, patch_size=patch_size, **common_kwargs)
 
     train_loader = DataLoader(
         train_ds,
-        batch_size=config["training"].get("batch_size", 1),
+        batch_size=batch_size,
         shuffle=True,
         num_workers=data_cfg.get("num_workers", 4),
         drop_last=True,

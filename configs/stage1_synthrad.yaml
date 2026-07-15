@@ -1,0 +1,74 @@
+# Stage 1 (MRI -> CT wavelet diffusion, trained on SynthRAD2023) config.
+# Every hyperparameter the code reads lives here -- nothing is hardcoded in
+# data/, models/, or training/. See CLAUDE.md for the reasoning behind these
+# choices (architecture decision record).
+
+seed: 42
+
+data:
+  # Kaggle input path from the 2026-07-15 session:
+  # Folder: fd7akxj65n5yjxwds -> /kaggle/input/datasets/fd7akxj65n5yjxwds -> synthrad-2023
+  synthrad_root: "/kaggle/input/datasets/fd7akxj65n5yjxwds/synthrad-2023"
+  region: "brain"                    # SynthRAD2023 also has pelvis; only brain matches the BraTS pairing goal
+  target_spacing: [1.0, 1.0, 1.0]     # mm, matches SynthRAD2023's official brain preprocessing
+  ct_clip_range: [-1000.0, 3000.0]    # HU clip range before normalization to [-1, 1]
+  match_brats_domain: true            # zero non-brain voxels in both MR and CT -- see CLAUDE.md domain-gap note
+  crop_margin: 10                     # voxel margin around the brain-mask bounding box, matches SynthRAD2023 convention
+  spatial_multiple: 16                # 2 (wavelet) * 2^3 (3 U-Net downsamples for channel_mult below) -- must match model.channel_mult length
+  patch_size: null                    # e.g. [128, 128, 128] to train on random crops instead of full volumes; must be a multiple of spatial_multiple
+  train_val_split: 0.9
+  num_workers: 4
+  cache_dir: "/kaggle/working/synthrad_cache"   # preprocessed volumes cached here after first epoch; null to disable
+
+model:
+  base_channels: 64
+  channel_mult: [1, 2, 4, 4]          # 3 downsamples -> spatial_multiple above must be 2 * 2^3 = 16
+  num_res_blocks: 2
+  attention_resolutions: [2, 4]       # self-attention at these downsample factors (relative to the wavelet-domain input)
+  num_heads: 4
+  num_groups: 32
+  dropout: 0.0
+
+diffusion:
+  timesteps: 1000
+  noise_schedule: "linear"
+  beta_start: 0.0001
+  beta_end: 0.02
+  predict: "epsilon"
+  subband_loss_weights: [1, 1, 1, 1, 1, 1, 1, 1]   # LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH
+  ddim_steps: 100                     # sampling steps for eval-time preview and Stage 2 inference
+  ddim_eta: 0.0                       # 0 = deterministic DDIM (fast); 1 = stochastic, approximates ancestral DDPM
+
+training:
+  batch_size: 1                       # full 3D volumes; increase only if patch_size is set and VRAM allows
+  grad_accum_steps: 4                 # effective batch size = batch_size * grad_accum_steps
+  lr: 0.0001
+  weight_decay: 0.0
+  optimizer: "adamw"
+  lr_schedule: "cosine"                # constant | cosine | linear_warmup_cosine
+  warmup_steps: 1000
+  total_steps: 200000
+  ema_decay: 0.9999
+  amp: true                            # mixed precision -- roughly halves VRAM use and speeds up training on Kaggle GPUs
+  grad_clip_norm: 1.0
+  log_interval: 50                     # steps between progress-log-file writes
+  val_interval: 1000                   # steps between quick validation-loss checks (no full sampling, just loss)
+  val_batches: 5                       # number of val batches averaged per validation check
+  checkpoint_interval: 1000            # steps between checkpoint saves (not epochs -- a full-dataset epoch may be long)
+  keep_last_n_checkpoints: 3           # older numbered checkpoints are pruned; ckpt_latest.pt always kept
+  log_file: "/kaggle/working/logs/stage1_train_log.csv"
+
+checkpoint:
+  working_dir: "/kaggle/working/checkpoints/stage1_synthrad"
+  # Populate this on a fresh Kaggle session with the mounted path of a
+  # previous session's saved Output (Add Input -> Notebook Output Files).
+  # See CLAUDE.md's "What you need to do on Kaggle's side" section.
+  extra_resume_dirs: []
+
+kaggle:
+  note: >
+    Checkpoints write to checkpoint.working_dir under /kaggle/working, which
+    Kaggle's "Save Version" persists as a Kaggle Output. To resume in a new
+    session: Save Version on the old one, then Add Input -> Notebook Output
+    Files on the new one, and add the mounted checkpoints path to
+    checkpoint.extra_resume_dirs above.
