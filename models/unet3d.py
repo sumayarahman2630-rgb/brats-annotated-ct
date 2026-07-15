@@ -10,12 +10,28 @@ from __future__ import annotations
 
 import logging
 import math
+from contextlib import contextmanager
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 log = logging.getLogger(__name__)
+
+# Prefer flash/memory-efficient SDPA backends (O(N) memory via tiling) over the
+# "math" fallback (materializes the full N x N score matrix -> O(N^2) memory,
+# the direct cause of the 594 GiB OOM this was added to diagnose -- see
+# CLAUDE.md's "Known bugs fixed"). API moved between torch versions; support both.
+try:
+    from torch.nn.attention import SDPBackend, sdpa_kernel as _sdpa_kernel
+
+    def _preferred_attention_backend():
+        return _sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION])
+except ImportError:  # torch < 2.3ish
+    @contextmanager
+    def _preferred_attention_backend():
+        with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_mem_efficient=True, enable_math=False):
+            yield
 
 # Dense self-attention is O(N^2) in the flattened spatial size N. Above this N,
 # a full attention matrix starts costing multiple GiB per head and can OOM outright
@@ -83,6 +99,7 @@ class SelfAttention3D(nn.Module):
         nn.init.zeros_(self.proj.weight)
         nn.init.zeros_(self.proj.bias)
         self._warned_large_n = False
+        self._warned_backend_fallback = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, d, h, w = x.shape
@@ -102,10 +119,32 @@ class SelfAttention3D(nn.Module):
             self._warned_large_n = True
         qkv = self.qkv(self.norm(x)).reshape(b, 3, self.num_heads, c // self.num_heads, n)
         q, k, v = qkv.unbind(1)
-        q, k, v = (t.transpose(-1, -2) for t in (q, k, v))  # (b, heads, n, c_head)
-        out = F.scaled_dot_product_attention(q, k, v)
+        # .contiguous(): flash/memory-efficient SDPA kernels are stride-sensitive and can
+        # silently refuse (or be forced) into the memory-hungry math fallback on the
+        # non-contiguous strides transpose() alone produces.
+        q, k, v = (t.transpose(-1, -2).contiguous() for t in (q, k, v))  # (b, heads, n, c_head)
+        out = self._attend(q, k, v)
         out = out.transpose(-1, -2).reshape(b, c, d, h, w)
         return x + self.proj(out)
+
+    def _attend(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        if not q.is_cuda:
+            return F.scaled_dot_product_attention(q, k, v)
+        try:
+            with _preferred_attention_backend():
+                return F.scaled_dot_product_attention(q, k, v)
+        except RuntimeError as e:
+            if not self._warned_backend_fallback:
+                log.warning(
+                    "SelfAttention3D: flash/memory-efficient SDPA backend unavailable for this "
+                    "input (shape=%s, dtype=%s) -- '%s'. Falling back to the default backend, "
+                    "which may include the memory-hungry 'math' kernel (O(N^2) instead of O(N) "
+                    "memory). If this leads to OOM, reduce model.attention_resolutions to fewer "
+                    "levels (e.g. just the bottleneck) instead of relying on the backend alone.",
+                    tuple(q.shape), q.dtype, str(e).splitlines()[0] if str(e) else type(e).__name__,
+                )
+                self._warned_backend_fallback = True
+            return F.scaled_dot_product_attention(q, k, v)
 
 
 class ResAttnBlock(nn.Module):

@@ -126,11 +126,11 @@ have zeroed-out skull/scalp — correct for this project, since the deliverable
 is tumor-region CT, not a full-head radiotherapy-planning CT.
 
 **Model capacity:** base_channels=64, channel_mult=(1,2,4,4), 2 res-blocks per
-level, attention at the two coarsest wavelet-domain resolutions
-(`attention_resolutions: [4, 8]` — **not** `[2, 4]`, see "Known bugs fixed"
-below for why that distinction matters), 32 groups — same order of magnitude
-as cwdm's brain-translation config. All overridable in
-`configs/stage1_synthrad.yaml`; nothing hardcoded in the model file.
+level, self-attention at the bottleneck only (`attention_resolutions: [8]`
+for `channel_mult`'s 4 levels — **not** `[2, 4]` or even `[4, 8]`, both of
+which OOM'd on a real T4; see "Known bugs fixed" below), 32 groups. All
+overridable in `configs/stage1_synthrad.yaml`; nothing hardcoded in the
+model file.
 
 **Diffusion:** standard DDPM, 1000 linear-schedule timesteps, epsilon
 prediction, MSE loss averaged over the 8 wavelet subbands (equal weighting,
@@ -171,6 +171,43 @@ otherwise healthy, the 2×T4 setup *would* be usable for `torch.nn.
 DataParallel`/DDP to run batch_size=2 (one full volume per GPU) for better
 throughput — not implemented, flagged as a possible future addition, not
 needed for the two goals as scoped.
+
+**2026-07-15 (same day, round 2) — `[4, 8]` still OOM'd.** The `[4, 8]` fix
+above was necessary but not sufficient: on the actual full-size real brain
+volume, level 4 alone (N=24,960) needed ~9.3 GiB for its dense attention
+matrix, on top of ~7.85 GiB already used by the higher-resolution
+conv/res-blocks before it — total exceeded the T4's 14.56 GiB. Two things
+were tried:
+1. **Force the flash/memory-efficient SDPA backend** (`models/unet3d.py`,
+   `_preferred_attention_backend()` / `SelfAttention3D._attend()`): these
+   backends compute attention via tiling instead of materializing the full
+   N×N score matrix, so memory should scale ~O(N) instead of O(N²). Wraps
+   `F.scaled_dot_product_attention` in `torch.nn.attention.sdpa_kernel`
+   (falling back to the older `torch.backends.cuda.sdp_kernel` API on
+   pre-2.3ish torch), requesting FLASH_ATTENTION/EFFICIENT_ATTENTION only
+   (math excluded). If neither is usable for the actual shape/dtype/GPU
+   (raises `RuntimeError`), it logs a warning once and retries with the
+   default backend selection so training doesn't hard-crash either way.
+   Also switched q/k/v to `.contiguous()` after the transpose, since
+   fused kernels are stride-sensitive and non-contiguous tensors alone can
+   force a fallback to math. **This could not be verified on this
+   machine — no CUDA GPU available here.** Whether it actually keeps
+   `[4, 8]` under budget on a real T4 is unconfirmed; the warning log
+   will say plainly if it fell back.
+2. **Reduce `attention_resolutions` to `[8]` (bottleneck only)** — this is
+   the change actually shipped as the new default, because it's a certain
+   fix verifiable by arithmetic alone (bottleneck N is only ~3,000 on a
+   real volume, trivial regardless of which SDPA backend ends up being
+   used) rather than something that depends on unconfirmed GPU/driver/torch
+   behavior. Quality tradeoff: one fewer attention level than the original
+   two-coarsest-levels design intent — likely small, not measured.
+
+**To do when GPU time allows:** rerun the smoke test with `attention_
+resolutions: [4, 8]` restored in the config. If the backend-forcing change
+keeps it under the T4's budget (check the log for the fallback warning —
+its absence means an efficient backup ran), keep `[4, 8]` for the real
+training run since it's closer to the original design intent. If it still
+OOMs or the fallback warning fires, stay on `[8]`.
 
 ## Repo layout
 

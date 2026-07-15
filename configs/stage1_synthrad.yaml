@@ -29,13 +29,18 @@ model:
   num_res_blocks: 2
   # Self-attention runs at levels whose downsample factor (2^level, level 0 = right
   # after the wavelet transform) appears in this list. For channel_mult's 4 levels
-  # the per-level factors are [1, 2, 4, 8] -- so "the two coarsest levels" is [4, 8],
-  # NOT [2, 4] (that hits the two *middle* levels instead, where the spatial grid is
-  # still large enough that dense O(N^2) attention allocates hundreds of GiB and OOMs
-  # -- this exact misconfiguration crashed a real smoke test on 2026-07-15, see
-  # CLAUDE.md). If you change channel_mult's length, recompute this list to match:
-  # the two largest values in [2^0, 2^1, ..., 2^(len(channel_mult)-1)].
-  attention_resolutions: [4, 8]
+  # the per-level factors are [1, 2, 4, 8] -- level 8 is the true bottleneck.
+  # [4, 8] ("the two coarsest levels") was tried on 2026-07-15 and, on a real full-size
+  # brain volume, still OOMs at level 4 (N=24,960 -> ~9.3 GiB dense attention matrix,
+  # on top of ~7.85 GiB already used by higher-resolution blocks, on a 14.56 GiB T4).
+  # [8]-only (bottleneck-only, current default) is the certain fix -- N is only a few
+  # thousand there, trivial memory. See CLAUDE.md's "Known bugs fixed" for the full
+  # story, including an unverified-on-GPU attempt at forcing the flash/memory-efficient
+  # SDPA backend (models/unet3d.py) that might make [4, 8] safe again -- worth
+  # re-testing once training is otherwise stable, since bottleneck-only attention is a
+  # real (if likely small) quality tradeoff. If you change channel_mult's length,
+  # recompute: the bottleneck factor is 2^(len(channel_mult)-1).
+  attention_resolutions: [8]
   num_heads: 4
   num_groups: 32
   dropout: 0.0
