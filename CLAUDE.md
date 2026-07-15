@@ -179,19 +179,46 @@ independently for this codebase, for academic-defense originality.
    released, pre-registered data (the Kaggle copy is the challenge's
    post-registration release) — this codebase does not re-run Elastix.
 
-## Status
+## Status (last updated 2026-07-15, end of first session)
 
 | Piece | Status |
 |---|---|
 | CLAUDE.md | done |
-| data/preprocessing.py | in progress |
-| data/loaders_synthrad.py | not started |
-| models/wavelet_transform.py, unet3d.py, stage1_mri2ct_ddpm.py | not started |
-| configs/stage1_synthrad.yaml | not started |
-| training/ema.py, checkpoint.py, train_stage1.py | not started |
-| data/loaders_brats.py | not started |
-| inference/run_stage2_brats.py | not started |
-| git remote | connected to https://github.com/sumayarahman2630-rgb/brats-annotated-ct.git, not yet pushed |
+| data/preprocessing.py | done |
+| data/loaders_synthrad.py | done |
+| models/wavelet_transform.py, unet3d.py, stage1_mri2ct_ddpm.py | done |
+| configs/stage1_synthrad.yaml | done |
+| training/ema.py, checkpoint.py, train_stage1.py | done |
+| data/loaders_brats.py | done |
+| inference/run_stage2_brats.py | done |
+| git remote | connected and pushed to https://github.com/sumayarahman2630-rgb/brats-annotated-ct.git (branch: main) |
+
+**Everything above has been smoke-tested end-to-end** with a synthetic
+fake-data pipeline (tiny volumes, tiny model, a handful of steps) run
+locally on CPU -- not on the real SynthRAD2023/BraTS data (not accessible
+from this machine) and not on GPU. What's verified:
+- Haar DWT -> IDWT is an exact inverse (float32 precision, ~1e-7 error).
+- Full train -> checkpoint -> resume cycle resumes from the exact correct
+  step with correct optimizer/EMA/LR-scheduler state (not a restart).
+- discover_synthrad_patients / discover_brats_patients correctly parse
+  filenames (in particular: BraTS `_t1ce` is never mistaken for `_t1`).
+- Stage 2 crops the model's padded output back to the exact original T1
+  voxel grid (so the synthetic CT and the tumor mask stay spatially
+  aligned), correctly pairs/omits the tumor mask per patient, skips
+  already-generated patients on rerun, and logs a per-patient
+  success/failure manifest without one bad patient stopping the cohort.
+
+**What is NOT yet verified**, because this machine has no GPU and no
+access to the real Kaggle datasets: actual training dynamics/loss
+convergence on real data, real memory/time budget on a Kaggle GPU at the
+configured model size (base_channels=64, channel_mult=[1,2,4,4]), and
+whether `discover_synthrad_patients`/`discover_brats_patients` correctly
+parse the *real* Kaggle-hosted folder layouts (both were written to be
+pattern-robust rather than assume an exact layout, precisely because that
+couldn't be inspected from here -- **run a quick sanity check on Kaggle
+first**: import the loader, call `discover_synthrad_patients(...)` /
+`discover_brats_patients(...)` on the real paths, and confirm the patient
+counts look right before kicking off a long training run).
 
 ## Not yet done / explicitly out of scope for today
 
@@ -202,12 +229,29 @@ independently for this codebase, for academic-defense originality.
   to the BraTS pairing goal).
 - Elastix re-registration (relying on SynthRAD2023's pre-registered release).
 
-## Resume instructions for a fresh session
+## Next steps (start here in a fresh session)
 
-Read the Status table above, pick up the first "not started" row, and check
-the corresponding file for a `# TODO` or missing-function stub before writing
-new code — don't assume a partially-listed file is empty. Run
-`git log --oneline` to see what's actually been committed vs. what this file
-claims (this file can lag a crash). Each row in the task breakdown in the
-original prompt was designed to be one commit — check `git log` against the
-Status table to find the exact resume point.
+All six pieces from both goals exist, are wired together, and pass a local
+CPU smoke test on synthetic data (see Status above) -- but nothing has
+touched the real datasets or a GPU yet. In order:
+
+1. On Kaggle, sanity-check dataset discovery before committing to a long
+   run: `from data.loaders_synthrad import discover_synthrad_patients` /
+   `from data.loaders_brats import discover_brats_patients`, call each on
+   the real paths, confirm the patient counts look right (hundreds for
+   SynthRAD2023 brain, ~370 for BraTS2020 training).
+2. Start `training/train_stage1.py` on Kaggle GPU. Watch the first
+   checkpoint save and the log file (`training.log_file`) for sane
+   (decreasing) loss. If VRAM runs out, first thing to try is lowering
+   `model.base_channels` or setting `data.patch_size` in the config
+   (nothing to change in code).
+3. Once Stage 1 has produced at least one checkpoint, Stage 2 can start
+   immediately (`inference/run_stage2_brats.py`) even while Stage 1 keeps
+   training in another session -- that's by design.
+4. Follow the manual Kaggle steps above (Save Version -> new Dataset -> Add
+   Input) each time a session is about to end, on both the training and
+   inference sides.
+
+If resuming after a crash or context reset: run `git log --oneline` to see
+what's actually committed (this file is updated alongside commits but can
+lag if a session ends abruptly), then re-read the "Status" section above.
