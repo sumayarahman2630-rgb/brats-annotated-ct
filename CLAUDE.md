@@ -80,7 +80,11 @@ validation pass, not just forward/backward passes. Watch `nvidia-smi` (or
 Kaggle's GPU memory panel) during this run for OOM headroom before starting
 the real `total_steps: 200000` run on the full cohort. Both flags are
 optional and independent -- `--max_steps 50` alone, or `--max_patients 2`
-alone, both work.
+alone, both work. This exact smoke test is what surfaced the attention OOM
+bug documented under "Known bugs fixed" below — now fixed, but worth
+rerunning after any future change to `model.channel_mult` or
+`model.attention_resolutions` specifically, since that's the class of bug
+this smoke test is best at catching before it costs a full training run.
 
 ## Architecture decision record
 
@@ -122,15 +126,51 @@ have zeroed-out skull/scalp — correct for this project, since the deliverable
 is tumor-region CT, not a full-head radiotherapy-planning CT.
 
 **Model capacity:** base_channels=64, channel_mult=(1,2,4,4), 2 res-blocks per
-level, attention at the two coarsest wavelet-domain resolutions, 32 groups —
-same order of magnitude as cwdm's brain-translation config. All overridable
-in `configs/stage1_synthrad.yaml`; nothing hardcoded in the model file.
+level, attention at the two coarsest wavelet-domain resolutions
+(`attention_resolutions: [4, 8]` — **not** `[2, 4]`, see "Known bugs fixed"
+below for why that distinction matters), 32 groups — same order of magnitude
+as cwdm's brain-translation config. All overridable in
+`configs/stage1_synthrad.yaml`; nothing hardcoded in the model file.
 
 **Diffusion:** standard DDPM, 1000 linear-schedule timesteps, epsilon
 prediction, MSE loss averaged over the 8 wavelet subbands (equal weighting,
 matches cwdm's default; weights are a config list so this is tunable later).
 DDIM sampling (default 100 steps) for Stage 2 inference — ancestral 1000-step
 sampling per BraTS volume would make a full-cohort run impractical.
+
+## Known bugs fixed
+
+**2026-07-15 — attention OOM (594 GiB allocation) during the first real
+Kaggle smoke test.** `model.attention_resolutions` in the config means
+"apply self-attention at U-Net levels whose downsample factor from the
+wavelet-domain input (2^level) is in this list." For `channel_mult`'s 4
+levels the per-level factors are `[1, 2, 4, 8]`, so the two *coarsest*
+levels are factors `[4, 8]` — but the config default was `[2, 4]`, which
+actually hits levels 1 and 2 (the two *middle* levels). On a real brain
+volume (~96×80×72 at the wavelet-domain level-0 resolution), level 1 is
+still 48×40×36 = 69,120 spatial positions; a dense O(N²) attention matrix
+at that N is ~71 GiB for the forward pass alone, ballooning past 500 GiB
+once backward-pass buffers are counted — that's the 594.14 GiB CUDA OOM.
+Root-caused by simulating the level/resolution_factor mapping with the
+real volume size (no GPU needed, see the commit) rather than guessing from
+the stack trace. **Fix:** `attention_resolutions: [4, 8]` (models/unet3d.py
+was never structurally wrong — only the config value was). Also added a
+permanent runtime guard in `SelfAttention3D.forward`: if the flattened
+spatial sequence length N exceeds 24³ = 13,824, it logs a warning with the
+actual shape and estimated GiB cost the first time that module runs, so a
+future `channel_mult` change without a matching `attention_resolutions`
+update fails loudly and early instead of as an opaque OOM stack trace deep
+inside `scaled_dot_product_attention`.
+
+Dual-GPU note: the user has 2×T4 available for this — **not relevant to
+this particular bug**. A 594 GiB single-tensor allocation attempt isn't a
+"not enough VRAM" problem that more GPUs fixes; `train_stage1.py` has no
+multi-GPU/distributed logic at all (single-device only), so a second GPU
+sitting idle wouldn't have changed anything here. Once training is
+otherwise healthy, the 2×T4 setup *would* be usable for `torch.nn.
+DataParallel`/DDP to run batch_size=2 (one full volume per GPU) for better
+throughput — not implemented, flagged as a possible future addition, not
+needed for the two goals as scoped.
 
 ## Repo layout
 

@@ -8,11 +8,22 @@ U-Net (Ho et al. / guided-diffusion lineage), not copied from a specific repo.
 """
 from __future__ import annotations
 
+import logging
 import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+log = logging.getLogger(__name__)
+
+# Dense self-attention is O(N^2) in the flattened spatial size N. Above this N,
+# a full attention matrix starts costing multiple GiB per head and can OOM outright
+# on the "math" SDPA fallback (which materializes the whole N x N matrix) -- warn
+# loudly rather than fail with an opaque CUDA OOM stack trace deep inside SDPA.
+# 24**3 = 13,824 is a deliberately conservative cap for a 14-16GB GPU: at that N,
+# a single fp32 QK^T matrix is already ~1.1 GiB per head.
+_ATTENTION_N_WARN_THRESHOLD = 24 ** 3
 
 
 def timestep_embedding(timesteps: torch.Tensor, dim: int, max_period: int = 10000) -> torch.Tensor:
@@ -71,10 +82,24 @@ class SelfAttention3D(nn.Module):
         self.proj = nn.Conv3d(channels, channels, kernel_size=1)
         nn.init.zeros_(self.proj.weight)
         nn.init.zeros_(self.proj.bias)
+        self._warned_large_n = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, d, h, w = x.shape
         n = d * h * w
+        if n > _ATTENTION_N_WARN_THRESHOLD and not self._warned_large_n:
+            est_gib = (b * self.num_heads * n * n * 4) / (1024 ** 3)
+            log.warning(
+                "SelfAttention3D got input spatial shape (%d, %d, %d) -> flattened sequence "
+                "length N=%d. A dense attention matrix at this N is roughly %.1f GiB "
+                "(batch=%d, heads=%d, fp32) and can OOM outright. This almost always means "
+                "model.attention_resolutions in the config doesn't actually correspond to the "
+                "coarsest downsample level(s) for your model.channel_mult -- see the comment "
+                "above attention_resolutions in configs/stage1_synthrad.yaml for how to compute "
+                "the correct values.",
+                d, h, w, n, est_gib, b, self.num_heads,
+            )
+            self._warned_large_n = True
         qkv = self.qkv(self.norm(x)).reshape(b, 3, self.num_heads, c // self.num_heads, n)
         q, k, v = qkv.unbind(1)
         q, k, v = (t.transpose(-1, -2) for t in (q, k, v))  # (b, heads, n, c_head)
