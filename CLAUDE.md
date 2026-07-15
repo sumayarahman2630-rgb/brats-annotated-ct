@@ -142,6 +142,51 @@ sampling per BraTS volume would make a full-cohort run impractical.
 
 ## Known bugs fixed
 
+**2026-07-16 — BraTS Stage 2 input was missing Stage 1's brain-crop step
+(found before Stage 1 training even finished, by re-reading both
+preprocessing paths side by side rather than waiting to see bad output).**
+`SynthRADBrainDataset._load_and_preprocess` (Stage 1 training) does
+resample -> mask+**crop to brain bbox + margin** -> normalize -> pad.
+`BraTSVolumeDataset.__getitem__` (Stage 2 inference) was doing resample ->
+normalize -> pad -- the crop step was simply missing. BraTS T1 is already
+skull-stripped so the *masking* half is implicit (background already 0),
+but nothing was cropping the volume down to the brain region, so Stage 2
+was feeding the model the full ~240x240x155 BraTS grid (brain filling
+~40-50% of the frame) instead of the tightly-cropped volumes (brain filling
+~80-90% of the frame) Stage 1 actually trained on. Doesn't crash (fully
+convolutional network, any input size "works") -- it's a silent
+distribution shift that would have produced degraded/garbage-looking
+output with no error to point at the cause.
+
+**Fix:** `BraTSVolumeDataset` now computes the same `bounding_box(...,
+margin=crop_margin)` + `crop_to_box(...)` Stage 1 uses (crop_margin read
+from the same Stage 1 config key, so the two paths can't drift out of sync
+independently), before `normalize_mri`. Returns `full_shape` (the
+resampled, pre-crop T1 grid -- what the tumor mask and final output canvas
+need to match) and `crop_box` alongside the cropped+padded MRI tensor.
+`run_stage2_brats.py` now reverses this correctly: crops the model's output
+back to the pre-pad cropped shape, then `place_in_full_canvas()` pastes it
+into a full-size canvas at `crop_box`'s location (everything outside filled
+with the normalized background value, so it denormalizes to exactly
+CT_BACKGROUND_HU = -1000, matching Stage 1's convention) -- rather than the
+old code's now-incorrect "crop the output back to the full T1 shape"
+(there was nothing to crop; the input was never cropped in the first
+place).
+
+**Verified without a GPU:** built a synthetic BraTS patient with a small,
+precisely-known "brain" region inside a much larger frame (brain occupying
+~0.4% of the full volume, growing to ~17% after cropping -- deliberately
+exaggerated vs. real BraTS's ~40-50% to make any bug in the crop/paste-back
+logic unmistakable), ran it through the real `run_stage2_brats.py`
+end-to-end against an actual trained (tiny) checkpoint, and confirmed: output
+CT shape matches the full BraTS grid exactly; every voxel outside the crop
+box is exactly -1000 HU; voxels inside vary (real generated content); the
+tumor mask's 72 nonzero voxels land at exactly their original coordinates.
+Also reran the standard (brain-fills-most-of-frame) regression case to
+confirm no behavior change there. This is a pure Stage 2 fix -- nothing
+about Stage 1's training data or the checkpoints already produced needed
+to change.
+
 **2026-07-15 — attention OOM (594 GiB allocation) during the first real
 Kaggle smoke test.** `model.attention_resolutions` in the config means
 "apply self-attention at U-Net levels whose downsample factor from the

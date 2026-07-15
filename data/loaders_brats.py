@@ -13,10 +13,23 @@ filename, so directory grouping is the only option there.
 
 Preprocessing reuses the exact same normalize_mri / resample_to_spacing /
 pad_to_multiple functions Stage 1 training used on the MR channel, with the
-same target_spacing and spatial_multiple values -- pass in the same values
-used for configs/stage1_synthrad.yaml's data section (see
+same target_spacing, spatial_multiple, and crop_margin values -- pass in the
+same values used for configs/stage1_synthrad.yaml's data section (see
 inference/run_stage2_brats.py, which does this automatically by loading
 the Stage 1 config).
+
+Critically, this also reuses Stage 1's bounding-box crop step (see
+SynthRADBrainDataset._load_and_preprocess in loaders_synthrad.py: mask ->
+crop-to-bbox+margin -> normalize -> pad). BraTS T1 is already skull-stripped
+so the masking step is implicit (background is already 0), but the CROP
+step still has to happen explicitly -- without it, the model would see the
+full ~240x240x155 BraTS grid (brain filling ~40-50% of the frame) instead of
+the tightly brain-cropped volumes (brain filling ~80-90% of the frame) it
+was actually trained on. That mismatch doesn't crash anything (the network
+is fully convolutional) but is exactly the kind of silent distribution
+shift that produces garbage output -- found and fixed 2026-07-15 while
+Stage 1 training was still running, specifically by re-reading both
+preprocessing paths side by side before Stage 2's first real run.
 """
 from __future__ import annotations
 
@@ -30,7 +43,7 @@ import SimpleITK as sitk
 import torch
 from torch.utils.data import Dataset
 
-from data.preprocessing import normalize_mri, pad_to_multiple, resample_to_spacing
+from data.preprocessing import bounding_box, crop_to_box, normalize_mri, pad_to_multiple, resample_to_spacing
 
 log = logging.getLogger(__name__)
 
@@ -80,18 +93,22 @@ def discover_brats_patients(root: str) -> list[BraTSPatient]:
 class BraTSVolumeDataset(Dataset):
     """Returns preprocessed T1 tensors ready for Stage 1 inference, plus
     everything needed to write the output back in the correct physical
-    space: the pre-padding shape (to crop the model's output back to it)
-    and the resampled reference sitk.Image (for spacing/origin/direction)."""
+    space: `full_shape` (the resampled, pre-crop T1 grid -- what the
+    output canvas and tumor mask need to match) and `crop_box` (where the
+    cropped/generated region belongs within that full grid), plus the
+    resampled reference sitk.Image (for spacing/origin/direction)."""
 
     def __init__(
         self,
         patients: list[BraTSPatient],
         target_spacing: tuple[float, float, float] = (1.0, 1.0, 1.0),
         spatial_multiple: int = 16,
+        crop_margin: int = 10,
     ):
         self.patients = patients
         self.target_spacing = target_spacing
         self.spatial_multiple = spatial_multiple
+        self.crop_margin = crop_margin
 
     def __len__(self) -> int:
         return len(self.patients)
@@ -101,16 +118,26 @@ class BraTSVolumeDataset(Dataset):
 
         t1_img = resample_to_spacing(sitk.ReadImage(patient.t1_path), self.target_spacing, is_mask=False, default_value=0.0)
         t1_arr = sitk.GetArrayFromImage(t1_img).astype(np.float32)
-        original_shape = t1_arr.shape
+        full_shape = t1_arr.shape
 
         foreground = t1_arr != 0  # BraTS T1 is skull-stripped: background is exactly 0
-        t1_norm = normalize_mri(t1_arr, foreground_mask=foreground)
+        if np.any(foreground):
+            crop_box = bounding_box(foreground, margin=self.crop_margin)
+        else:
+            crop_box = ((0, full_shape[0]), (0, full_shape[1]), (0, full_shape[2]))
+
+        t1_cropped = crop_to_box(t1_arr, crop_box)
+        foreground_cropped = crop_to_box(foreground, crop_box)
+
+        t1_norm = normalize_mri(t1_cropped, foreground_mask=foreground_cropped)
         t1_padded = pad_to_multiple(t1_norm, self.spatial_multiple, pad_value=-1.0)
 
         return {
             "mri": torch.from_numpy(t1_padded).unsqueeze(0).float(),
             "patient_id": patient.patient_id,
             "seg_path": patient.seg_path,
-            "original_shape": original_shape,
+            "full_shape": full_shape,
+            "crop_box": crop_box,
+            "cropped_shape": t1_cropped.shape,
             "reference_image": t1_img,
         }

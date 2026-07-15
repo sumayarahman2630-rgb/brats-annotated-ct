@@ -116,14 +116,28 @@ def write_hu_image(hu_array: np.ndarray, reference_image: sitk.Image, path: str)
     sitk.WriteImage(img, path)
 
 
-def process_seg_mask(seg_path: str, target_spacing, original_shape, reference_image: sitk.Image, out_path: str) -> None:
+def process_seg_mask(seg_path: str, target_spacing, full_shape, reference_image: sitk.Image, out_path: str) -> None:
     seg_img = resample_to_spacing(sitk.ReadImage(seg_path), target_spacing, is_mask=True, default_value=0.0)
     seg_arr = sitk.GetArrayFromImage(seg_img).astype(np.uint8)
-    seg_cropped = pad_or_crop_to_shape(seg_arr, original_shape, pad_value=0)
-    out_img = sitk.GetImageFromArray(seg_cropped.astype(np.uint8))
+    seg_full = pad_or_crop_to_shape(seg_arr, full_shape, pad_value=0)
+    out_img = sitk.GetImageFromArray(seg_full.astype(np.uint8))
     out_img.CopyInformation(reference_image)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     sitk.WriteImage(out_img, out_path)
+
+
+def place_in_full_canvas(cropped_array: np.ndarray, crop_box, full_shape, fill_value: float) -> np.ndarray:
+    """Inverse of the bounding-box crop BraTSVolumeDataset applies: paste the
+    model's (cropped-resolution) output back into a canvas the size of the
+    full resampled T1 grid, so it lines up voxel-for-voxel with the original
+    T1 and its tumor mask for pairing. Everything outside the crop box --
+    where the model never generated anything -- gets `fill_value` (pass the
+    normalized background, -1.0, before denormalizing the whole canvas so it
+    comes out as exactly CT_BACKGROUND_HU, matching Stage 1's convention)."""
+    canvas = np.full(full_shape, fill_value, dtype=cropped_array.dtype)
+    (x0, x1), (y0, y1), (z0, z1) = crop_box
+    canvas[x0:x1, y0:y1, z0:z1] = cropped_array
+    return canvas
 
 
 def main():
@@ -161,6 +175,7 @@ def main():
     data_cfg = config["data"]
     target_spacing = tuple(data_cfg.get("target_spacing", (1.0, 1.0, 1.0)))
     spatial_multiple = data_cfg.get("spatial_multiple", 16)
+    crop_margin = data_cfg.get("crop_margin", 10)
     ct_clip_range = tuple(data_cfg.get("ct_clip_range", (-1000.0, 3000.0)))
     num_steps = settings["num_steps"] or config["diffusion"].get("ddim_steps", 100)
 
@@ -170,7 +185,7 @@ def main():
     if not patients:
         raise RuntimeError(f"No BraTS patients discovered under {settings['brats_root']!r}.")
 
-    dataset = BraTSVolumeDataset(patients, target_spacing=target_spacing, spatial_multiple=spatial_multiple)
+    dataset = BraTSVolumeDataset(patients, target_spacing=target_spacing, spatial_multiple=spatial_multiple, crop_margin=crop_margin)
 
     output_dir = settings["output_dir"]
     manifest_path = os.path.join(output_dir, "manifest.csv")
@@ -204,15 +219,19 @@ def main():
                 ct_pred_norm = model.sample(mri, num_steps=num_steps)
 
             ct_pred_norm = ct_pred_norm.squeeze(0).squeeze(0).cpu().numpy()
-            ct_pred_norm = pad_or_crop_to_shape(ct_pred_norm, item["original_shape"], pad_value=-1.0)
-            ct_hu = denormalize_ct(ct_pred_norm, *ct_clip_range)
+            # undo pad_to_multiple (back to the cropped brain-region shape the model actually saw)...
+            ct_pred_norm = pad_or_crop_to_shape(ct_pred_norm, item["cropped_shape"], pad_value=-1.0)
+            # ...then undo the bounding-box crop (paste back into the full T1 grid, so the
+            # synthetic CT lines up voxel-for-voxel with the original T1 and its tumor mask)
+            ct_pred_full = place_in_full_canvas(ct_pred_norm, item["crop_box"], item["full_shape"], fill_value=-1.0)
+            ct_hu = denormalize_ct(ct_pred_full, *ct_clip_range)
 
             ct_out_path = os.path.join(output_dir, patient.patient_id, "synthetic_ct.nii.gz")
             write_hu_image(ct_hu, item["reference_image"], ct_out_path)
 
             # patient.seg_path is guaranteed non-None here -- patients without one were skipped above
             mask_out_path = os.path.join(output_dir, patient.patient_id, "tumor_mask.nii.gz")
-            process_seg_mask(patient.seg_path, target_spacing, item["original_shape"], item["reference_image"], mask_out_path)
+            process_seg_mask(patient.seg_path, target_spacing, item["full_shape"], item["reference_image"], mask_out_path)
 
             elapsed = time.time() - t0
             log.info("[%d/%d] %s -> %s (%.1fs)", i + 1, len(patients), patient.patient_id, ct_out_path, elapsed)
