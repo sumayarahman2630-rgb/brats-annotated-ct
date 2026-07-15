@@ -176,11 +176,23 @@ def main():
     manifest_path = os.path.join(output_dir, "manifest.csv")
     init_manifest(manifest_path)
 
-    n_success, n_failed, n_skipped = 0, 0, 0
+    n_success, n_failed, n_skipped, n_no_mask = 0, 0, 0, 0
     for i, patient in enumerate(patients):
         if not settings["overwrite"] and already_done(output_dir, patient.patient_id):
             log.info("[%d/%d] %s already generated, skipping", i + 1, len(patients), patient.patient_id)
             n_skipped += 1
+            continue
+
+        if patient.seg_path is None:
+            # The deliverable is a CT+mask pair -- generating a CT with no mask to pair
+            # it with would just waste GPU time on an unusable output, so skip outright
+            # rather than silently producing an unpaired volume.
+            log.info("[%d/%d] %s has no seg.nii (tumor mask) -- skipping, nothing to pair the synthetic CT with", i + 1, len(patients), patient.patient_id)
+            append_manifest_row(manifest_path, {
+                "patient_id": patient.patient_id, "status": "skipped_no_mask",
+                "ct_path": "", "mask_path": "", "error": "", "elapsed_sec": "0.0",
+            })
+            n_no_mask += 1
             continue
 
         t0 = time.time()
@@ -198,10 +210,9 @@ def main():
             ct_out_path = os.path.join(output_dir, patient.patient_id, "synthetic_ct.nii.gz")
             write_hu_image(ct_hu, item["reference_image"], ct_out_path)
 
-            mask_out_path = ""
-            if patient.seg_path is not None:
-                mask_out_path = os.path.join(output_dir, patient.patient_id, "tumor_mask.nii.gz")
-                process_seg_mask(patient.seg_path, target_spacing, item["original_shape"], item["reference_image"], mask_out_path)
+            # patient.seg_path is guaranteed non-None here -- patients without one were skipped above
+            mask_out_path = os.path.join(output_dir, patient.patient_id, "tumor_mask.nii.gz")
+            process_seg_mask(patient.seg_path, target_spacing, item["original_shape"], item["reference_image"], mask_out_path)
 
             elapsed = time.time() - t0
             log.info("[%d/%d] %s -> %s (%.1fs)", i + 1, len(patients), patient.patient_id, ct_out_path, elapsed)
@@ -220,8 +231,8 @@ def main():
             })
             n_failed += 1
 
-    log.info("Done. success=%d failed=%d skipped=%d (total=%d). See %s for the full record.",
-              n_success, n_failed, n_skipped, len(patients), manifest_path)
+    log.info("Done. success=%d failed=%d skipped=%d no_mask=%d (total=%d). See %s for the full record.",
+              n_success, n_failed, n_skipped, n_no_mask, len(patients), manifest_path)
 
 
 if __name__ == "__main__":

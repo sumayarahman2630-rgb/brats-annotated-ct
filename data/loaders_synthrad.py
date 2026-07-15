@@ -196,6 +196,11 @@ def build_synthrad_dataloaders(config: dict, seed: int = 0) -> tuple[DataLoader,
             "Fix data.synthrad_root in the config before training."
         )
 
+    max_patients = data_cfg.get("max_patients")
+    if max_patients:
+        patients = patients[:max_patients]
+        log.info("data.max_patients=%d set -- using only %d patients (smoke-test mode)", max_patients, len(patients))
+
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(patients))
     split = int(len(patients) * data_cfg.get("train_val_split", 0.9))

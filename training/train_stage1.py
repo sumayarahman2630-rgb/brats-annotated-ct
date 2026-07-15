@@ -106,10 +106,33 @@ def quick_validation_loss(model, val_cycle: CycleLoader, device, num_batches: in
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=str, default="configs/stage1_synthrad.yaml")
+    parser.add_argument("--max_steps", type=int, default=None,
+                         help="Smoke-test override: run only this many steps instead of training.total_steps "
+                              "from the config, without editing the file.")
+    parser.add_argument("--max_patients", type=int, default=None,
+                         help="Smoke-test override: use only this many discovered patients instead of "
+                              "data.max_patients from the config, without editing the file. "
+                              "e.g. --max_steps 100 --max_patients 3 for a quick GPU/OOM check "
+                              "before a full run on the full cohort.")
     args = parser.parse_args()
 
     with open(args.config) as f:
         config = yaml.safe_load(f)
+
+    if args.max_steps is not None:
+        config["training"]["total_steps"] = args.max_steps
+        log.info("--max_steps override: training.total_steps = %d", args.max_steps)
+    if args.max_patients is not None:
+        config["data"]["max_patients"] = args.max_patients
+        log.info("--max_patients override: data.max_patients = %d", args.max_patients)
+
+    # A smoke-test total_steps can be far smaller than the configured checkpoint/val
+    # intervals (e.g. total_steps=100 but checkpoint_interval=1000) -- clamp both down
+    # so a short run still actually exercises a checkpoint save and a validation pass,
+    # which is the whole point of running it.
+    total_steps = config["training"]["total_steps"]
+    config["training"]["checkpoint_interval"] = min(config["training"]["checkpoint_interval"], total_steps)
+    config["training"]["val_interval"] = min(config["training"].get("val_interval", total_steps), total_steps)
 
     set_seed(config.get("seed", 0))
 

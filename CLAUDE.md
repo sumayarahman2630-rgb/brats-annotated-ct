@@ -56,6 +56,32 @@ hardcoded per-file assumption beyond the confirmed root paths, and both log
 what they found on first run so a wrong path fails loudly instead of
 silently loading zero patients.
 
+**Confirmed on real Kaggle data (2026-07-15):** 180 SynthRAD2023 brain
+patients, 369 BraTS2020 training patients (1 missing `seg.nii`). The
+missing-mask BraTS patient is handled: `discover_brats_patients` returns it
+with `seg_path=None`, and `inference/run_stage2_brats.py` skips it outright
+(logged as `skipped_no_mask` in `manifest.csv`, not counted as failed) rather
+than generating a synthetic CT with nothing to pair it to — the deliverable
+is the CT+mask pair, so an unpaired CT isn't useful output. `data/
+loaders_synthrad.py`'s folder-content validation (see the commit that added
+it) also means a bad SynthRAD patient folder is silently excluded the same
+way, not just BraTS.
+
+**Stage 1 smoke test (do this before a full run):** `training/train_stage1.py`
+takes `--max_steps` and `--max_patients` to run a short GPU/OOM check without
+touching the config file or the full 180-patient cohort:
+```
+python -m training.train_stage1 --config configs/stage1_synthrad.yaml --max_steps 100 --max_patients 3
+```
+This trains on only the first 3 discovered patients for 100 steps, and
+automatically clamps `checkpoint_interval`/`val_interval` down to fit inside
+that step budget so the run still exercises a real checkpoint save and
+validation pass, not just forward/backward passes. Watch `nvidia-smi` (or
+Kaggle's GPU memory panel) during this run for OOM headroom before starting
+the real `total_steps: 200000` run on the full cohort. Both flags are
+optional and independent -- `--max_steps 50` alone, or `--max_patients 2`
+alone, both work.
+
 ## Architecture decision record
 
 **Why wavelet-domain diffusion (cwdm-style), reimplemented from scratch:**

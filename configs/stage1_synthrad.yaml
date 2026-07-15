@@ -18,6 +18,7 @@ data:
   crop_margin: 10                     # voxel margin around the brain-mask bounding box, matches SynthRAD2023 convention
   spatial_multiple: 16                # 2 (wavelet) * 2^3 (3 U-Net downsamples for channel_mult below) -- must match model.channel_mult length
   patch_size: null                    # e.g. [128, 128, 128] to train on random crops instead of full volumes; must be a multiple of spatial_multiple
+  max_patients: null                  # cap the discovered patient count for a quick smoke test; null = use all. Also settable via train_stage1.py's --max_patients flag.
   train_val_split: 0.9
   num_workers: 4
   cache_dir: "/kaggle/working/synthrad_cache"   # preprocessed volumes cached here after first epoch; null to disable
