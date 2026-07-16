@@ -4,3 +4,8 @@ SimpleITK>=2.3
 PyYAML>=6.0
 tqdm>=4.66
 tensorboard>=2.15
+scikit-image>=0.22
+matplotlib>=3.8
+
+# dev/test only, not needed on Kaggle for training/inference:
+pytest>=7.4
