@@ -126,26 +126,29 @@ def crop_to_box(array: np.ndarray, box: tuple[tuple[int, int], tuple[int, int], 
 
 def pad_or_crop_to_shape(
     array: np.ndarray,
-    target_shape: tuple[int, int, int],
+    target_shape: tuple[int, ...],
     pad_value: float = NORMALIZED_BACKGROUND,
 ) -> np.ndarray:
-    """Center pad/crop each spatial axis independently to an exact target
-    shape. Used to give every volume in a batch identical dimensions."""
+    """Center pad/crop each of the array's leading len(target_shape) axes
+    independently to an exact target shape. Works for any dimensionality
+    (3D volumes for Stage 1/2, or 2D slices for the 2D pipeline) -- ndim is
+    read from target_shape's length, not hardcoded."""
     out = array
-    for axis in range(3):
+    ndim = len(target_shape)
+    for axis in range(ndim):
         cur = out.shape[axis]
         target = target_shape[axis]
         if cur < target:
             total_pad = target - cur
             pad_before = total_pad // 2
             pad_after = total_pad - pad_before
-            pad_width = [(0, 0)] * 3
+            pad_width = [(0, 0)] * out.ndim
             pad_width[axis] = (pad_before, pad_after)
             out = np.pad(out, pad_width, mode="constant", constant_values=pad_value)
         elif cur > target:
             total_crop = cur - target
             crop_before = total_crop // 2
-            sl = [slice(None)] * 3
+            sl = [slice(None)] * out.ndim
             sl[axis] = slice(crop_before, crop_before + target)
             out = out[tuple(sl)]
     return out
@@ -155,13 +158,18 @@ def pad_to_multiple(
     array: np.ndarray,
     multiple: int,
     pad_value: float = NORMALIZED_BACKGROUND,
+    ndim: int | None = None,
 ) -> np.ndarray:
     """Pad spatial dims up to the next multiple of `multiple`. Required so
-    the wavelet transform's downsampling and the U-Net's own downsampling
-    stages divide the volume exactly with no rounding/cropping mismatch --
-    multiple should be 2 (wavelet) * 2^(num_unet_downsamples)."""
+    a wavelet transform's downsampling and/or a U-Net's own downsampling
+    stages divide the array exactly with no rounding/cropping mismatch --
+    multiple should be (2 if using a wavelet transform, else 1) *
+    2^(num_unet_downsamples). Works for 2D or 3D arrays; ndim defaults to
+    the whole array's dimensionality (pass ndim=2 to only pad the first two
+    axes of an array that has extra leading/trailing axes)."""
+    ndim = ndim if ndim is not None else array.ndim
     target_shape = tuple(
-        int(np.ceil(s / multiple) * multiple) for s in array.shape[:3]
+        int(np.ceil(s / multiple) * multiple) for s in array.shape[:ndim]
     )
     return pad_or_crop_to_shape(array, target_shape, pad_value)
 

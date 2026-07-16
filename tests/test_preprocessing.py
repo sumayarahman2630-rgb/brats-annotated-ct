@@ -142,6 +142,17 @@ def test_pad_to_multiple_noop_when_already_aligned():
     assert out.shape == arr.shape
 
 
+def test_pad_to_multiple_works_on_2d_arrays():
+    """pad_to_multiple/pad_or_crop_to_shape generalized (round 8) to any
+    dimensionality so the 2D pipeline can reuse them instead of duplicating
+    this logic -- must still work correctly for a plain 2D slice."""
+    arr = np.zeros((17, 33), dtype=np.float32)
+    out = pad_to_multiple(arr, multiple=16)
+    assert out.shape == (32, 48)
+    for dim in out.shape:
+        assert dim % 16 == 0
+
+
 def test_pad_or_crop_to_shape_roundtrip_center_alignment():
     """pad then crop back to the original shape should be an exact identity
     for the un-padded region -- this is the property run_stage2_brats.py's
