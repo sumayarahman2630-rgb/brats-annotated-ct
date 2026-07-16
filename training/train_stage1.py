@@ -194,7 +194,25 @@ def main():
         # actually adjust it (e.g. lowering it so EMA converges faster on a short
         # continuation, instead of staying stuck at whatever decay the original run used).
         ema.decay = train_cfg.get("ema_decay", 0.9999)
-        log.info("Resumed from checkpoint %s at step %d (ema.decay set to config value %.4f)", latest_ckpt, global_step, ema.decay)
+        # Same class of bug, second instance: subband_loss_weights is a registered buffer
+        # on the model (models/stage1_mri2ct_ddpm.py), so model.load_state_dict() just
+        # silently restored it from the checkpoint too -- unlike the diffusion-schedule
+        # buffers (betas etc.), this one is always shape (8,) regardless of its actual
+        # values, so there's no shape-mismatch error to catch the problem; it just quietly
+        # keeps whatever weights were checkpointed. Concretely: the round-6 LLL-weighted
+        # config change ([3,1,1,1,1,1,1,1]) never actually took effect during the
+        # 5500->5750 continuation -- the model kept training with the original equal
+        # weights the whole time, silently. Re-apply from config, same fix as ema.decay.
+        diff_cfg = config["diffusion"]
+        new_weights = diff_cfg.get("subband_loss_weights")
+        if new_weights is not None:
+            model.subband_loss_weights.copy_(
+                torch.tensor(new_weights, dtype=model.subband_loss_weights.dtype, device=model.subband_loss_weights.device)
+            )
+        log.info(
+            "Resumed from checkpoint %s at step %d (ema.decay=%.4f, subband_loss_weights=%s)",
+            latest_ckpt, global_step, ema.decay, model.subband_loss_weights.tolist(),
+        )
     else:
         log.info("No checkpoint found in %s -- starting from scratch", search_dirs)
 
