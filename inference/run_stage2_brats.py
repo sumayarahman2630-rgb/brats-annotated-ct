@@ -26,9 +26,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import os
+import subprocess
 import time
+from datetime import datetime, timezone
 
 import numpy as np
 import SimpleITK as sitk
@@ -44,7 +47,10 @@ from training.ema import EMA
 log = logging.getLogger("run_stage2_brats")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-MANIFEST_FIELDS = ["patient_id", "status", "ct_path", "mask_path", "error", "elapsed_sec"]
+MANIFEST_FIELDS = [
+    "patient_id", "status", "ct_path", "mask_path", "error", "elapsed_sec",
+    "checkpoint_step", "ddim_steps", "use_ema", "generated_at",
+]
 
 
 def parse_args():
@@ -140,6 +146,103 @@ def place_in_full_canvas(cropped_array: np.ndarray, crop_box, full_shape, fill_v
     return canvas
 
 
+def _git_commit_hash() -> str | None:
+    """Best-effort: record which commit generated this dataset, for
+    reproducibility. None if git isn't available or this isn't a repo
+    checkout (e.g. a zipped download) -- not fatal either way."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+    except Exception:  # noqa: BLE001 -- purely informational, never worth failing a generation run over
+        return None
+
+
+def write_dataset_metadata(output_dir: str, run_info: dict) -> None:
+    """Machine-readable dataset-level provenance, refreshed after every run
+    (including resumed ones) to reflect the most recent generation session's
+    settings. manifest.csv remains the source of truth for exactly which
+    checkpoint/settings produced each INDIVIDUAL patient, since a dataset
+    built across multiple resumed sessions could have used different
+    checkpoints for different patients."""
+    path = os.path.join(output_dir, "metadata.json")
+    with open(path, "w") as f:
+        json.dump(run_info, f, indent=2)
+    log.info("Wrote dataset metadata: %s", path)
+
+
+def write_dataset_card(output_dir: str, run_info: dict, counts: dict) -> None:
+    """Human-readable dataset card (README.md) for the generated dataset,
+    populated with this run's actual numbers -- not a template the user
+    has to fill in by hand. Regenerated (overwritten) after every run, so
+    it always reflects the current state of output_dir."""
+    total = sum(counts.values())
+    lines = [
+        "# Synthetic CT dataset generated from BraTS T1 MRI",
+        "",
+        "Each `<patient_id>/` folder contains a synthetic CT volume generated from that "
+        "patient's real BraTS T1 MRI, paired with their original BraTS tumor segmentation "
+        "mask. This pairing is the point of the dataset: annotated CT for tumor-region work "
+        "where real annotated CT is scarce.",
+        "",
+        "## Generation method",
+        "",
+        f"- **Model**: wavelet-domain conditional diffusion (3D), see the source repository's "
+        f"CLAUDE.md for the full architecture decision record.",
+        f"- **Checkpoint**: `{run_info['checkpoint_path']}` (training step {run_info['checkpoint_step']})",
+        f"- **Weights used**: {'EMA' if run_info['use_ema'] else 'raw (non-EMA)'}",
+        f"- **Sampling**: DDIM, {run_info['ddim_steps']} steps",
+        f"- **Generated**: {run_info['generated_at']}",
+        f"- **Source commit**: `{run_info['git_commit'] or 'unknown (git unavailable at generation time)'}`",
+        "",
+        "## Contents",
+        "",
+        f"- Total BraTS patients considered: {total}",
+        f"- Successfully generated (CT + mask pair): {counts.get('success', 0)}",
+        f"- Skipped, already generated in a previous run: {counts.get('skipped', 0)}",
+        f"- Skipped, no tumor mask available to pair with: {counts.get('no_mask', 0)}",
+        f"- Failed (see manifest.csv for the error): {counts.get('failed', 0)}",
+        "",
+        "Per-patient file layout:",
+        "```",
+        "<patient_id>/",
+        "    synthetic_ct.nii.gz   -- int16 HU, same voxel grid/orientation as the source T1",
+        "    tumor_mask.nii.gz     -- uint8 label map, same grid, copied from the original BraTS seg.nii",
+        "```",
+        "`manifest.csv` (in this directory) has the full per-patient record: status, output paths, "
+        "the exact checkpoint step and DDIM step count used for that specific patient, and error "
+        "messages for any failures. If this dataset was built across multiple resumed sessions with "
+        "different checkpoints, manifest.csv -- not this file -- is the source of truth for which "
+        "checkpoint produced any given patient.",
+        "",
+        "## Known limitations -- read before using this data",
+        "",
+        "- **This is a research artifact, not a clinical or radiotherapy-planning CT.** The "
+        "non-brain region (skull, scalp, face) is deliberately zeroed to -1000 HU by design -- "
+        "the deliverable is tumor-region CT, not full-head CT.",
+        "- Synthetic CT quality is only as good as the Stage 1 checkpoint used (see checkpoint step "
+        "above) -- a checkpoint trained for few steps will produce correspondingly undertrained "
+        "output. Check the source repository's CLAUDE.md \"Known bugs fixed\" / status sections for "
+        "what was verified about this specific checkpoint's quality (e.g. PSNR/SSIM against real "
+        "SynthRAD validation CT) before treating this dataset as ground truth for downstream tasks.",
+        "- Tumor masks are the ORIGINAL BraTS annotations, unmodified -- their quality/consistency is "
+        "whatever the BraTS2020 challenge's own annotations provide, this pipeline doesn't alter them.",
+        "",
+        "## Citation / provenance",
+        "",
+        "Generated by `inference/run_stage2_brats.py` in the brats-annotated-ct project. See that "
+        "repository's CLAUDE.md for the full method, architecture decisions, and reference repos "
+        "this approach was inspired by (not copied from).",
+        "",
+    ]
+    path = os.path.join(output_dir, "README.md")
+    with open(path, "w") as f:
+        f.write("\n".join(lines))
+    log.info("Wrote dataset card: %s", path)
+
+
 def main():
     args = parse_args()
     settings = resolve_settings(args)
@@ -206,6 +309,7 @@ def main():
             append_manifest_row(manifest_path, {
                 "patient_id": patient.patient_id, "status": "skipped_no_mask",
                 "ct_path": "", "mask_path": "", "error": "", "elapsed_sec": "0.0",
+                "checkpoint_step": "", "ddim_steps": "", "use_ema": "", "generated_at": "",
             })
             n_no_mask += 1
             continue
@@ -238,6 +342,8 @@ def main():
             append_manifest_row(manifest_path, {
                 "patient_id": patient.patient_id, "status": "success",
                 "ct_path": ct_out_path, "mask_path": mask_out_path, "error": "", "elapsed_sec": f"{elapsed:.1f}",
+                "checkpoint_step": step, "ddim_steps": num_steps, "use_ema": settings["use_ema"],
+                "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             })
             n_success += 1
 
@@ -247,11 +353,27 @@ def main():
             append_manifest_row(manifest_path, {
                 "patient_id": patient.patient_id, "status": "failed",
                 "ct_path": "", "mask_path": "", "error": str(e), "elapsed_sec": f"{elapsed:.1f}",
+                "checkpoint_step": step, "ddim_steps": num_steps, "use_ema": settings["use_ema"],
+                "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             })
             n_failed += 1
 
     log.info("Done. success=%d failed=%d skipped=%d no_mask=%d (total=%d). See %s for the full record.",
               n_success, n_failed, n_skipped, n_no_mask, len(patients), manifest_path)
+
+    run_info = {
+        "checkpoint_path": ckpt_path,
+        "checkpoint_step": step,
+        "use_ema": settings["use_ema"],
+        "ddim_steps": num_steps,
+        "brats_root": settings["brats_root"],
+        "stage1_config": settings["stage1_config"],
+        "git_commit": _git_commit_hash(),
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    counts = {"success": n_success, "failed": n_failed, "skipped": n_skipped, "no_mask": n_no_mask}
+    write_dataset_metadata(output_dir, run_info)
+    write_dataset_card(output_dir, run_info, counts)
 
 
 if __name__ == "__main__":
