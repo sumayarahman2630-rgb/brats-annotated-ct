@@ -140,6 +140,57 @@ matches cwdm's default; weights are a config list so this is tunable later).
 DDIM sampling (default 100 steps) for Stage 2 inference — ancestral 1000-step
 sampling per BraTS volume would make a full-cohort run impractical.
 
+## 2026-07-16 (round 8) — PSNR root-cause audit: ruled out normalization bug
+
+Real data on the SynthRAD validation comparison: background exactly -1000.0
+HU (std=0), foreground -104 to -243 HU. Synthetic (step 9000 checkpoint,
+raw weights): background 884.7-908.5 HU, foreground 1062.7-1080.4 HU --
+both positive, both close together, nothing like the real bimodal
+distribution. The user's hypothesis: is this a normalization/denormalization
+bug (sign flip, wrong clip range applied at inference vs. training) rather
+than "just needs more training"?
+
+**Investigated and ruled out, with evidence, not just code reading:**
+1. Grepped every use of `ct_clip_range` across the codebase (`loaders_
+   synthrad.py`, `compare_synthrad_val.py`, `run_stage2_brats.py`) --
+   all read the same `data.ct_clip_range` config key; `normalize_ct`/
+   `denormalize_ct` are defined exactly once, in `data/preprocessing.py`.
+   No divergent value anywhere.
+2. Re-verified `normalize_ct`/`denormalize_ct` are exact inverses,
+   algebraically and numerically (6 HU values round-tripped exactly).
+3. The REAL data's background reading exactly -1000.0 with zero std is
+   itself strong evidence the round-trip (mask -> normalize -> denormalize)
+   works correctly -- this is the actual code path being exercised, and it
+   produces the exact right answer for ground truth.
+4. Explicitly tested the sign-flip hypothesis with real numbers: if the
+   normalized value's sign were flipped somewhere, real background (-1000
+   HU, normalized -1.0) would decode to +3000 HU, and real foreground
+   (-104 to -243 HU) would decode to +2104 to +2243 HU. Observed synthetic
+   values (884.7-1080.4) don't match this prediction at all -- rules out a
+   clean sign-flip bug.
+5. **What actually explains the numbers:** converting the observed
+   synthetic HU values back to normalized space gives approximately -0.058
+   to +0.040 -- clustered tightly around *normalized zero*, not around any
+   HU-space landmark. `denormalize_ct(0.0) = 1000.0 HU` exactly -- matching
+   the observed synthetic cluster. This means the model's raw output is
+   landing near the center of the valid range with almost no differentiation
+   between what should be starkly different regions (background -1.0 vs.
+   foreground -0.55ish, normalized) -- consistent with an undertrained
+   model producing weakly-informative, near-prior-centered output, NOT a
+   parameter mismatch. The reason this "centered but wrong" output *looks*
+   positive in HU space specifically is that the clip range (-1000, 3000)
+   is asymmetric -- its midpoint is +1000 HU, not 0 -- so a "hasn't learned
+   much yet" output happens to land in positive-HU territory by construction
+   of the range choice, not because of a sign error.
+
+**Conclusion: no normalization bug found. This is consistent with genuine
+undertraining**, not a quick fix. Honest, not the hoped-for outcome, but
+better than chasing a bug that (as far as this audit can tell without GPU
+access) doesn't exist in the inspectable code. Reinforces the priority on
+the 2D pipeline (round 8+, see below) as the faster path to a converged,
+demonstrable model, since 2D slices are far cheaper per step than full 3D
+volumes.
+
 ## Known bugs fixed
 
 **2026-07-16 (round 6) — Stage 2 sampled pure noise despite val_loss=0.01293
