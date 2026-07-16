@@ -39,7 +39,7 @@ import torch.nn.functional as F
 import yaml
 
 from data.loaders_synthrad import SynthRADBrainDataset, discover_synthrad_patients
-from data.preprocessing import denormalize_ct
+from data.preprocessing import denormalize_ct, pad_or_crop_to_shape
 from models.unet3d_regression import build_regression_model
 from training.checkpoint import find_latest_checkpoint, load_checkpoint, save_checkpoint
 from training.ema import EMA
@@ -162,13 +162,44 @@ def build_regression_dataloaders(config: dict, seed: int) -> tuple[torch.utils.d
     return train_loader, val_loader
 
 
+def _center_crop_batch_to_patch(batch: dict, patch_size: tuple[int, int, int] | None) -> dict:
+    """quick_validation's val_loader yields FULL-volume patients (see
+    build_regression_dataloaders's docstring -- deliberate, for the
+    standalone visualize_regression_val.py's whole-brain metrics). A real
+    SynthRAD full volume is far bigger than the training patch, and running
+    it through the model here OOM'd on a real Kaggle T4 (2026-07-16): a
+    single GroupNorm activation at full-volume resolution needed 1.62 GiB.
+    Center-crop (deterministic, so trends are comparable across checks) down
+    to the same patch_size training already uses -- reuses pad_or_crop_to_shape
+    rather than new cropping logic, same helper data/preprocessing.py already
+    provides and tests cover."""
+    if patch_size is None:
+        return batch
+    out = {}
+    for key, pad_value in (("mri", -1.0), ("ct", -1.0), ("mask", 0.0)):
+        arr = batch[key].squeeze(0).squeeze(0).numpy()
+        cropped = pad_or_crop_to_shape(arr, patch_size, pad_value=pad_value)
+        out[key] = torch.from_numpy(cropped).unsqueeze(0).unsqueeze(0)
+    out["patient_id"] = batch["patient_id"]
+    return out
+
+
 @torch.no_grad()
-def quick_validation(model, val_loader, device, max_patients: int, amp_enabled: bool, ct_clip_range: tuple[float, float]):
-    """Full-volume L1 + foreground PSNR over up to max_patients val patients,
-    on RAW (non-EMA) weights -- matches training loss's own weights, and
-    avoids the EMA-cold-start pitfall documented in CLAUDE.md (round 6):
-    this validation exists to track raw-weight training progress, not to
-    judge EMA quality."""
+def quick_validation(
+    model, val_loader, device, max_patients: int, amp_enabled: bool,
+    ct_clip_range: tuple[float, float], patch_size: tuple[int, int, int] | None,
+):
+    """L1 + foreground PSNR over up to max_patients val patients, on RAW
+    (non-EMA) weights -- matches training loss's own weights, and avoids the
+    EMA-cold-start pitfall documented in CLAUDE.md (round 6): this validation
+    exists to track raw-weight training progress, not to judge EMA quality.
+
+    Center-crops each val volume to `patch_size` (same as training) rather
+    than running full-volume inference -- see _center_crop_batch_to_patch's
+    docstring for why. This means this periodic check is a patch-level signal,
+    not a whole-brain one; inference/visualize_regression_val.py still does
+    full-volume evaluation for the real post-training numbers.
+    """
     model.eval()
     total_l1 = 0.0
     psnr_values = []
@@ -177,6 +208,7 @@ def quick_validation(model, val_loader, device, max_patients: int, amp_enabled: 
     for batch in val_loader:
         if n >= max_patients:
             break
+        batch = _center_crop_batch_to_patch(batch, patch_size)
         mri, ct = batch["mri"].to(device), batch["ct"].to(device)
         mask = batch["mask"].squeeze(0).squeeze(0).numpy().astype(bool)
         with autocast_ctx:
@@ -264,6 +296,8 @@ def main():
     val_max_patients = train_cfg.get("val_max_patients", 5)
     keep_last_n = train_cfg.get("keep_last_n_checkpoints", 3)
     ct_clip_range = tuple(config["data"].get("ct_clip_range", (-1000.0, 3000.0)))
+    val_patch_size = config["data"].get("patch_size")
+    val_patch_size = tuple(val_patch_size) if val_patch_size else None
 
     model.train()
     t_start = time.time()
@@ -294,15 +328,37 @@ def main():
             log.info("step %d/%d | l1_loss=%.5f | lr=%.6f | elapsed=%.1fs", global_step, total_steps, loss.item(), lr, elapsed)
             append_log_row(log_file, global_step, "train", loss.item(), None, lr, elapsed)
 
-        if global_step % val_interval == 0 or global_step == total_steps:
-            val_l1, val_psnr = quick_validation(model, val_loader, device, val_max_patients, amp_enabled, ct_clip_range)
-            elapsed = time.time() - t_start
-            log.info("step %d val: l1_loss=%.5f foreground_psnr=%.2f dB (over up to %d val patients)", global_step, val_l1, val_psnr, val_max_patients)
-            append_log_row(log_file, global_step, "val", val_l1, val_psnr, scheduler.get_last_lr()[0], elapsed)
-
+        # Checkpoint BEFORE validation, deliberately: validation is the riskier of the
+        # two (real-data OOM hit here on 2026-07-16, see quick_validation's docstring),
+        # so this step's checkpoint must already be safely on disk before validation
+        # runs -- otherwise a validation crash costs this step's progress too, not just
+        # the validation itself. (Originally the other way around; that ordering meant
+        # the very first checkpoint was never written when validation OOM'd at step 1000.)
         if global_step % checkpoint_interval == 0 or global_step == total_steps:
             path = save_checkpoint(ckpt_cfg["working_dir"], global_step, model, ema, optimizer, scheduler, keep_last_n=keep_last_n)
             log.info("Saved checkpoint: %s", path)
+
+        if global_step % val_interval == 0 or global_step == total_steps:
+            try:
+                val_l1, val_psnr = quick_validation(
+                    model, val_loader, device, val_max_patients, amp_enabled, ct_clip_range, val_patch_size,
+                )
+                elapsed = time.time() - t_start
+                log.info("step %d val: l1_loss=%.5f foreground_psnr=%.2f dB (over up to %d val patients)", global_step, val_l1, val_psnr, val_max_patients)
+                append_log_row(log_file, global_step, "val", val_l1, val_psnr, scheduler.get_last_lr()[0], elapsed)
+            except RuntimeError as e:
+                if "out of memory" not in str(e).lower():
+                    raise
+                # This step's checkpoint is already safely saved above -- a validation
+                # OOM here costs one skipped validation readout, not training progress.
+                log.warning(
+                    "step %d: validation OOM (%s) -- skipping this validation pass, training continues. "
+                    "Checkpoint for this step was already saved.",
+                    global_step, str(e).splitlines()[0] if str(e) else type(e).__name__,
+                )
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+                model.train()  # quick_validation calls model.eval() before the crash; restore train mode
 
     log.info("Training complete: %d steps.", global_step)
 
