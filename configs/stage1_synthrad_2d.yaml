@@ -1,0 +1,93 @@
+# Stage 1, 2D pipeline (MRI -> CT slice diffusion, trained on SynthRAD2023).
+# Fully separate from configs/stage1_synthrad.yaml (the 3D/wavelet pipeline)
+# -- different checkpoint directory, different everything -- so nothing here
+# can affect or be affected by the 3D pipeline. See CLAUDE.md for why this
+# pipeline exists (round 8: 3D training was undertrained by the deadline;
+# 2D slices are far cheaper per step, so this is the faster path to a
+# genuinely converged, demonstrable model).
+
+seed: 42
+
+data:
+  synthrad_root: "/kaggle/input/datasets/fd7akxj65n5yjxwds/synthrad-2023/Task1/brain"
+  region: null                        # path above is already scoped to Task1/brain
+  target_spacing: [1.0, 1.0, 1.0]
+  ct_clip_range: [-1000.0, 3000.0]
+  match_brats_domain: true            # same domain-gap handling as the 3D pipeline, see CLAUDE.md
+  crop_margin: 10
+  slice_axis: 0                       # 0 = axial (first axis of sitk.GetArrayFromImage's (z,y,x) order)
+  slice_size: [256, 256]               # every slice is padded/center-cropped to EXACTLY this size (not just
+                                        # multiple-aligned) so slices from different patients -- who have
+                                        # different natural crop sizes -- can still batch together. Must be
+                                        # divisible by 2^(len(model.channel_mult)-1) for the U-Net's downsampling.
+  min_foreground_fraction: 0.02        # skip slices where less than this fraction of pixels are brain (mostly-
+                                        # empty slices near the top/bottom of the crop teach little, waste compute)
+  max_patients: null                   # cap discovered patients for a quick smoke test; also settable via --max_patients
+  train_val_split: 0.9
+  num_workers: 4
+  cache_dir: "/kaggle/working/synthrad_2d_cache"   # NOTE: shares the underlying volume cache format with the
+                                                     # 3D pipeline's cache_dir -- use a DIFFERENT path than the 3D
+                                                     # config's data.cache_dir to avoid the two pipelines reading
+                                                     # each other's cached arrays (harmless if they did, since the
+                                                     # preprocessing is identical, but keep them separate for clarity)
+
+model:
+  base_channels: 64                    # full capacity by default -- 2D per-step cost is far lower than 3D's,
+                                        # no need to shrink this preemptively the way the 3D deadline config did
+  channel_mult: [1, 2, 4, 4]           # 3 downsamples: 256 -> 128 -> 64 -> 32
+  num_res_blocks: 2
+  # Lesson learned the hard way in the 3D pipeline (see CLAUDE.md "Known bugs
+  # fixed", the 594 GiB attention OOM): attention_resolutions must match the
+  # ACTUAL coarsest levels for channel_mult's length, not just "look small."
+  # For 4 levels the per-level downsample factors are [1, 2, 4, 8]. At 256x256
+  # input, level 1 (factor 2, 128x128, N=16384) is still large enough for
+  # dense attention to be expensive -- default here goes straight to [4, 8]
+  # (the two genuinely coarsest levels: 64x64 and 32x32, N=4096 and N=1024)
+  # rather than repeating the [2,4] mistake from the 3D pipeline's first pass.
+  attention_resolutions: [4, 8]
+  num_heads: 4
+  num_groups: 32
+  dropout: 0.0
+  use_checkpoint: false                 # 2D should be cheap enough not to need this; available (bool or list of
+                                         # resolution factors, same convention as attention_resolutions) if a real
+                                         # Kaggle run says otherwise -- see models/unet2d.py
+
+diffusion:
+  timesteps: 1000                       # full schedule -- 2D reaches meaningful step counts fast enough that the
+                                         # 3D pipeline's emergency timesteps=250 reduction (round 5) isn't needed
+  noise_schedule: "linear"
+  beta_start: 0.0001
+  beta_end: 0.02
+  predict: "epsilon"
+  ddim_steps: 50
+  ddim_eta: 0.0
+
+training:
+  batch_size: 8                         # 2D slices are cheap -- real batching is affordable, unlike the 3D
+                                         # pipeline's forced batch_size=1 (full volumes)
+  grad_accum_steps: 1
+  lr: 0.0001
+  weight_decay: 0.0
+  optimizer: "adamw"
+  lr_schedule: "cosine"
+  warmup_steps: 1000
+  total_steps: 200000                   # production target; checkpointed regularly, safe to interrupt anytime
+                                          # (see checkpoint_interval) and resume later, same as the 3D pipeline
+  ema_decay: 0.9999                      # standard value, appropriate for a real full-length run (NOT the 3D
+                                          # pipeline's deadline-night miscalibration -- see CLAUDE.md round 6 --
+                                          # this is fine as long as total_steps actually reaches the tens of
+                                          # thousands; if running a short smoke test only, don't trust EMA weights,
+                                          # same caveat as the 3D pipeline)
+  amp: true
+  grad_clip_norm: 1.0
+  log_interval: 50
+  val_interval: 1000
+  val_batches: 5
+  checkpoint_interval: 1000
+  keep_last_n_checkpoints: 3
+  log_file: "/kaggle/working/logs/stage1_2d_train_log.csv"
+
+checkpoint:
+  working_dir: "/kaggle/working/checkpoints/stage1_synthrad_2d"   # deliberately different from the 3D
+                                                                    # pipeline's checkpoint dir
+  extra_resume_dirs: []
