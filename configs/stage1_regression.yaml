@@ -1,0 +1,55 @@
+# Stage 1 (MRI -> CT), simple regression U-Net alternative to the wavelet
+# diffusion model (configs/stage1_synthrad.yaml). Added 2026-07-16 after a
+# user-trained prototype of this same simple architecture (L1 loss, skip
+# connections, 96x96x64 patches) got train PSNR 32-34 dB / SSIM 0.96-0.98
+# on real Kaggle data -- vastly ahead of the diffusion model's ~9 dB at
+# step 9500. That prototype had two known gaps this config's pipeline
+# fixes: no patient-level train/val split (so its good numbers are
+# train-set only, generalization unknown) and no brain-masking (so it was
+# training on full-head SynthRAD data, not the skull-stripped-matching
+# distribution BraTS/Stage 2 needs -- see CLAUDE.md's domain-gap note).
+# Reuses data/loaders_synthrad.py's SynthRADBrainDataset unchanged, so
+# match_brats_domain/crop/normalize here behave identically to the
+# diffusion config -- only the model and loss differ.
+
+seed: 42
+
+data:
+  synthrad_root: "/kaggle/input/datasets/fd7akxj65n5yjxwds/synthrad-2023/Task1/brain"
+  region: null
+  target_spacing: [1.0, 1.0, 1.0]
+  ct_clip_range: [-1000.0, 3000.0]
+  match_brats_domain: true            # fixes prototype gap #2 -- see header note
+  crop_margin: 10
+  spatial_multiple: 16                # 2^4 (4 U-Net downsamples for model.channel_mult below); no wavelet transform in this pipeline
+  patch_size: [96, 96, 64]            # training patches; must each be a multiple of spatial_multiple (96/16=6, 64/16=4 -- OK)
+  max_patients: null
+  train_val_split: 0.9                # fixes prototype gap #1 -- patient-level split, no leakage (see training/train_stage1_regression.py)
+  num_workers: 4
+  cache_dir: "/kaggle/working/synthrad_regression_cache"
+
+model:
+  base_channels: 32
+  channel_mult: [1, 2, 4, 8]          # 4 levels, 3 downsamples -- deliberately deeper/simpler than the diffusion U-Net (no attention at all)
+  num_groups: 8
+
+training:
+  batch_size: 2                       # patch-based training, unlike the diffusion pipeline's full-volume batch_size=1
+  lr: 0.0002
+  weight_decay: 0.0
+  lr_schedule: "cosine"
+  warmup_steps: 200
+  total_steps: 20000
+  amp: true
+  grad_clip_norm: 1.0
+  ema_decay: 0.999                    # EMA state is saved for reference only -- inference/visualize_regression_val.py always evaluates RAW weights (same deliberate anti-contamination pattern as compare_synthrad_val.py; see CLAUDE.md round 6)
+  log_interval: 25
+  val_interval: 1000
+  val_max_patients: 5                 # cap on the periodic in-training validation pass (full-volume, so this stays cheap); visualize_regression_val.py covers the FULL val set separately after training
+  checkpoint_interval: 1000
+  keep_last_n_checkpoints: 3
+  log_file: "/kaggle/working/logs/stage1_regression_log.csv"
+
+checkpoint:
+  working_dir: "/kaggle/working/checkpoints/stage1_regression"   # separate from both the 3D diffusion and 2D pipeline checkpoint dirs -- never collides
+  extra_resume_dirs: []
