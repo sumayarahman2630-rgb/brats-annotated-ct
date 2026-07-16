@@ -464,24 +464,41 @@ back to `true` (guaranteed fix, see above) before touching anything else.
 ## Repo layout
 
 ```
-configs/stage1_synthrad.yaml        all Stage 1 hyperparameters — nothing hardcoded in code
-configs/stage2_inference_brats.yaml Stage 2 paths/settings (brats_root, output_dir, etc.) — CLI flags override for one-off runs
+configs/
+  stage1_synthrad.yaml         all Stage 1 (3D) hyperparameters — nothing hardcoded in code
+  stage1_synthrad_2d.yaml      Stage 1 (2D pipeline) hyperparameters -- separate checkpoint dir, never collides with 3D
+  stage2_inference_brats.yaml  Stage 2 paths/settings (brats_root, output_dir, etc.) — CLI flags override for one-off runs
 data/
-  preprocessing.py             HU clip/normalize, resample, brain-mask, patch/pad —
-                                shared by both the SynthRAD loader and the BraTS loader
-                                so Stage 2 inputs are normalized exactly like Stage 1 trained on
-  loaders_synthrad.py          full SynthRAD2023 brain cohort Dataset
+  preprocessing.py             HU clip/normalize, resample, brain-mask, patch/pad (N-dimensional --
+                                works for both 3D volumes and 2D slices) — shared by every loader so
+                                Stage 2 inputs are normalized exactly like Stage 1 trained on
+  loaders_synthrad.py          full SynthRAD2023 brain cohort Dataset (3D volumes)
+  loaders_synthrad_2d.py       2D axial-slice Dataset, wraps loaders_synthrad.py for preprocessing reuse
   loaders_brats.py             BraTS T1 + seg mask Dataset (discovery-based, Kaggle-path aware)
 models/
-  wavelet_transform.py         Haar 3D DWT / IDWT (exact inverse)
-  unet3d.py                    3D conditional U-Net backbone (timestep + condition conditioning)
-  stage1_mri2ct_ddpm.py        composes the above into the diffusion model (q_sample, p_losses, sampler)
+  wavelet_transform.py         Haar 3D DWT / IDWT (exact inverse) -- 3D pipeline only
+  unet3d.py                    3D conditional U-Net backbone (wavelet-domain)
+  stage1_mri2ct_ddpm.py        composes the above into the 3D diffusion model
+  unet2d.py                    2D conditional U-Net backbone (pixel-space, no wavelet transform)
+  stage1_mri2ct_ddpm_2d.py     composes the above into the 2D diffusion model
+                                -- deliberately NO shared code between the 3D and 2D model files, so a
+                                bug/dead-end in one pipeline can never affect the other
 training/
   ema.py                       exponential moving average of model weights
   checkpoint.py                save/find-latest/load — used by both training and inference for resumability
-  train_stage1.py              training loop entry point
+  train_stage1.py              3D training loop entry point
+  train_stage1_2d.py           2D training loop entry point (same resumability design, separate script)
 inference/
-  run_stage2_brats.py          resumable per-patient Stage 2 generation entry point
+  run_stage2_brats.py          resumable per-patient Stage 2 generation entry point; writes manifest.csv
+                                (per-patient provenance), metadata.json, and a populated README.md dataset
+                                card into output_dir after every run
+  compare_synthrad_val.py      diagnostic: real vs. synthetic CT + PSNR/SSIM on the SynthRAD validation
+                                split, raw weights only (no EMA object constructed at all)
+scripts/
+  check_orientation_consistency.py  diagnostic: compares NIfTI direction matrices between a real SynthRAD
+                                     and a real BraTS file -- an unverified risk flagged in round 8, see
+                                     "Not yet done" below
+tests/                          formal CPU-only test suite (43 tests) -- see tests/README.md
 ```
 
 ## Resumability strategy (why it's built this way)
@@ -560,51 +577,129 @@ independently for this codebase, for academic-defense originality.
    released, pre-registered data (the Kaggle copy is the challenge's
    post-registration release) — this codebase does not re-run Elastix.
 
-## Status (last updated 2026-07-15, end of first session)
+## Status (last updated 2026-07-16, end of overnight autonomous session)
 
 | Piece | Status |
 |---|---|
-| CLAUDE.md | done |
-| data/preprocessing.py | done |
-| data/loaders_synthrad.py | done |
-| models/wavelet_transform.py, unet3d.py, stage1_mri2ct_ddpm.py | done |
-| configs/stage1_synthrad.yaml | done |
-| configs/stage2_inference_brats.yaml | done |
-| training/ema.py, checkpoint.py, train_stage1.py | done |
-| data/loaders_brats.py | done |
-| inference/run_stage2_brats.py | done |
-| git remote | connected and pushed to https://github.com/sumayarahman2630-rgb/brats-annotated-ct.git (branch: main) |
+| 3D pipeline (all files) | done, trained on real Kaggle data to step 9000 |
+| 2D pipeline (all files) | done, built + CPU-tested tonight, **never run on a real GPU or real data** |
+| Stage 2 (BraTS generation) | done, enriched with metadata.json + auto-generated README.md dataset card |
+| `tests/` (43 tests) | done, all passing, CPU-only |
+| `scripts/check_orientation_consistency.py` | done, **never run against real data** (see round 8 below) |
+| git remote | https://github.com/sumayarahman2630-rgb/brats-annotated-ct.git (branch: main), all work pushed |
 
-**Everything above has been smoke-tested end-to-end** with a synthetic
-fake-data pipeline (tiny volumes, tiny model, a handful of steps) run
-locally on CPU -- not on the real SynthRAD2023/BraTS data (not accessible
-from this machine) and not on GPU. What's verified:
-- Haar DWT -> IDWT is an exact inverse (float32 precision, ~1e-7 error).
-- Full train -> checkpoint -> resume cycle resumes from the exact correct
-  step with correct optimizer/EMA/LR-scheduler state (not a restart).
-- discover_synthrad_patients / discover_brats_patients correctly parse
-  filenames (in particular: BraTS `_t1ce` is never mistaken for `_t1`).
-- Stage 2 crops the model's padded output back to the exact original T1
-  voxel grid (so the synthetic CT and the tumor mask stay spatially
-  aligned), correctly pairs/omits the tumor mask per patient, skips
-  already-generated patients on rerun, and logs a per-patient
-  success/failure manifest without one bad patient stopping the cohort.
+**Real Kaggle 3D checkpoint, as of the last message from the user tonight:**
+step 9000, `configs/stage1_synthrad.yaml`, `/kaggle/working/checkpoints/stage1_synthrad/`.
+SynthRAD validation comparison (raw weights, not EMA — see round 6):
+foreground-only PSNR ~9 dB, SSIM negative. Root-caused in round 8 (below) as
+genuine undertraining, not a bug — no quick fix exists in the code as
+written. **Do not trust this checkpoint's visual output as a finished
+deliverable** — it's a real, resumable, correctly-engineered checkpoint at
+an early point in training, not a converged model.
 
-**What is NOT yet verified**, because this machine has no GPU and no
-access to the real Kaggle datasets: actual training dynamics/loss
-convergence on real data, and real memory/time budget on a Kaggle GPU at
-the configured model size (base_channels=64, channel_mult=[1,2,4,4]).
-Dataset paths and per-patient file layout are now confirmed (see "Kaggle
-dataset paths" above) and both discovery functions were verified against
-synthetic directories mirroring those exact confirmed layouts and filename
-conventions — but that's still not the same as running against the real
-files, which can have quirks a mirror doesn't reproduce (a handful of
-malformed/renamed patients, unexpected extra files, etc.). **Still worth a
-quick sanity check on Kaggle before a long run**: import the loader, call
-`discover_synthrad_patients(...)` / `discover_brats_patients(...)` on the
-real paths, and confirm the patient counts look right (hundreds for
-SynthRAD2023 brain, ~370 for BraTS2020 training) before kicking off
-training or a full Stage 2 cohort run.
+## 2026-07-16 — overnight autonomous session (rounds 6-9)
+
+The user asked me to work unattended for several hours after their deadline
+was going to be missed to sleep, with instructions to (1) hunt for a bug
+behind the bad PSNR, (2) verify BraTS/SynthRAD preprocessing consistency
+and build a real test suite, (3) build a completely separate 2D pipeline
+as a faster path to actual convergence, (4) turn Stage 2 into a properly
+documented, reusable dataset generator, and (5) leave this file in a state
+that lets a fresh start (theirs or a future Claude session's) pick up
+immediately. Small logical commits throughout, never touching the working
+3D checkpoint/pipeline. What actually happened, honestly:
+
+**Round 8 — PSNR root-cause audit (Priority 1). Conclusion: no bug found.**
+Exhaustively checked: `ct_clip_range` is read from the same config key
+everywhere (grepped every usage); `normalize_ct`/`denormalize_ct` are exact
+inverses (verified algebraically and numerically); the sign-flip hypothesis
+was explicitly tested and rejected with concrete numbers (would predict real
+background decoding to +3000 HU, foreground to +2100-2243 HU — doesn't match
+observed synthetic values at all); conditioning pass-through, DDIM math, and
+wavelet subband ordering were all re-derived and checked. **What actually
+explains the numbers**: the synthetic HU values, converted back to
+normalized space, cluster tightly around normalized zero — and
+`denormalize_ct(0.0) = 1000.0 HU` exactly, matching the observed synthetic
+cluster. The model's raw output is centered and weakly differentiated
+(consistent with undertraining), and only *looks* positive in HU space
+because the clip range (-1000, 3000) is asymmetric around zero, not because
+of a sign or parameter bug. Full derivation and the two supporting quantitative
+tests are pinned as permanent regression tests in `tests/test_preprocessing.py`
+(`test_normalized_zero_maps_to_clip_range_midpoint`,
+`test_sign_flip_hypothesis_rejected`) so this doesn't need re-deriving by
+hand under time pressure again.
+
+Two real (smaller) bugs *were* found and fixed along the way, both the same
+class as the round-6 EMA-decay bug: config values that map onto a
+fixed-shape buffer or custom-`load_state_dict` object get silently
+overwritten by whatever the checkpoint stored on resume, with no error
+(shapes match, so `load_state_dict` succeeds silently). Fixed for
+`subband_loss_weights` (PR #1, merged) the same way `ema.decay` was fixed
+in round 6 — re-apply the config value after `load_checkpoint`. Concretely,
+this means round 6's LLL-subband-weighting change never actually took effect
+during the real 5500→5750 step continuation on Kaggle; it's fixed now for
+any future continuation.
+
+**Round 8 — orientation-consistency risk flagged, not resolved (part of
+Priority 2).** While auditing preprocessing, found that `resample_to_spacing`
+uses each image's own `GetOrigin()`/`GetDirection()` with no canonical
+reorientation step anywhere in the pipeline. If SynthRAD's brain MR/CT and
+BraTS's T1 use different orientation conventions in their NIfTI headers, a
+"D" index in a SynthRAD-trained model's condition input would not correspond
+to the same physical direction in BraTS input — a real conditioning mismatch,
+independent of (and potentially compounding) the undertraining finding above.
+**Could not be checked from this machine** (no access to the real dataset
+files). `scripts/check_orientation_consistency.py` is ready to run on Kaggle
+— see the wake-up runbook below, this should be one of the first things
+checked.
+
+**Priority 2 (rest) — formal test suite.** 43 tests added under `tests/`
+(see `tests/README.md`), all CPU-only, all passing: wavelet exact-inverse,
+the preprocessing round-trip and sign-flip checks from the PSNR audit,
+`UNet3D`/`UNet2D` shape and checkpointing correctness (including the round-4
+GroupNorm-divisibility regression), patient discovery content-validation,
+and two subprocess-based integration tests that run the real training and
+Stage 2 scripts end to end (checkpoint resume correctness, brain-crop
+geometry correctness). `pad_to_multiple`/`pad_or_crop_to_shape` were
+generalized from hardcoded-3D to N-dimensional so the 2D pipeline could
+reuse them instead of duplicating the logic (backward compatible, existing
+3D behavior unchanged, confirmed by the existing tests passing unmodified).
+
+**Priority 3 — standalone 2D pipeline, built and CPU-tested tonight, NEVER
+run on a real GPU or real data.** `models/unet2d.py` +
+`models/stage1_mri2ct_ddpm_2d.py`: same building blocks and lessons learned
+as the 3D model (FiLM timestep conditioning, safe GroupNorm groups,
+activation checkpointing) but no wavelet transform — a single 2D slice is
+already small enough for full-resolution pixel-space diffusion, so the
+compression that was specifically necessary for full 3D volumes isn't needed.
+`data/loaders_synthrad_2d.py` wraps the 3D loader for preprocessing reuse and
+adds slice indexing with background-slice skipping — **caught and fixed a
+real batching bug before it could bite on Kaggle**: different patients have
+different natural crop sizes, so multiple-alignment padding (like the 3D
+loader uses) produces different-shaped slices per patient that can't batch
+together; fixed by padding/cropping every slice to a fixed `slice_size`
+instead (also just standard practice for 2D pipelines generally).
+`training/train_stage1_2d.py` + `configs/stage1_synthrad_2d.yaml`: same
+resumability design as the 3D script, deliberately separate checkpoint
+directory, and the `attention_resolutions: [4, 8]` default is set correctly
+from the start (not `[2, 4]`) specifically because of the lesson learned the
+hard way in the 3D pipeline's OOM saga. Full train→checkpoint→resume cycle
+verified locally end to end on fake data (`tests/test_train_stage1_2d_resume.py`).
+**What tonight's testing does NOT tell you**: real memory/time budget on an
+actual Kaggle GPU, and — most importantly — whether it actually converges
+faster than 3D in practice. That's a real-GPU question, first item in the
+runbook below.
+
+**Priority 4 — Stage 2 is now a documented, reusable dataset generator.**
+`manifest.csv` gained `checkpoint_step`, `ddim_steps`, `use_ema`,
+`generated_at` per patient (a dataset built across multiple resumed
+sessions could have used different checkpoints for different patients —
+manifest.csv is the source of truth for which). `run_stage2_brats.py` now
+writes `metadata.json` (machine-readable run provenance, including a git
+commit hash when available) and a populated `README.md` dataset card
+(actual counts and settings from the run, not a template to fill in by
+hand) into `output_dir` after every run. Verified end to end against the
+existing fake-data checkpoint.
 
 ## 2026-07-15 deadline night (round 5) — demo push, 3am deadline
 
@@ -646,38 +741,104 @@ with `--max_steps 20` before trusting it with the full run.
 Dual-GPU (2xT4) explicitly not pursued tonight -- see the round-4 entry
 above; that reasoning is unchanged and is doubly true with a hard deadline.
 
-## Not yet done / explicitly out of scope for today
+## Not yet done / explicitly out of scope
 
 - Dice-on-downstream-segmentation evaluation (med-ddpm's practice) — worth
-  adding once Stage 2 has produced enough volumes to evaluate.
+  adding once a converged Stage 2 dataset exists to evaluate.
 - Classifier-free guidance / conditioning dropout for the denoiser.
 - Pelvis region (SynthRAD2023 covers brain + pelvis; only brain is relevant
   to the BraTS pairing goal).
 - Elastix re-registration (relying on SynthRAD2023's pre-registered release).
+- Canonical image reorientation (`sitk.DICOMOrient`) — only worth adding if
+  `scripts/check_orientation_consistency.py` finds a real mismatch (see
+  round 8 above; unverified, first thing to check on wake-up).
 
-## Next steps (start here in a fresh session)
+## Wake-up runbook — exact order of operations
 
-All six pieces from both goals exist, are wired together, and pass a local
-CPU smoke test on synthetic data (see Status above) -- but nothing has
-touched the real datasets or a GPU yet. In order:
+**Step 0 — orient yourself.** `git log --oneline -15` to see what's
+actually committed (this file is updated alongside commits but can lag if
+a session ends abruptly). Then `python -m pytest tests/` — should show
+43 passed. If it doesn't, something regressed after this was written;
+trust the test failures over this file's claims.
 
-1. On Kaggle, sanity-check dataset discovery before committing to a long
-   run: `from data.loaders_synthrad import discover_synthrad_patients` /
-   `from data.loaders_brats import discover_brats_patients`, call each on
-   the real paths, confirm the patient counts look right (hundreds for
-   SynthRAD2023 brain, ~370 for BraTS2020 training).
-2. Start `training/train_stage1.py` on Kaggle GPU. Watch the first
-   checkpoint save and the log file (`training.log_file`) for sane
-   (decreasing) loss. If VRAM runs out, first thing to try is lowering
-   `model.base_channels` or setting `data.patch_size` in the config
-   (nothing to change in code).
-3. Once Stage 1 has produced at least one checkpoint, Stage 2 can start
-   immediately (`inference/run_stage2_brats.py`) even while Stage 1 keeps
-   training in another session -- that's by design.
-4. Follow the manual Kaggle steps above (Save Version -> new Dataset -> Add
-   Input) each time a session is about to end, on both the training and
-   inference sides.
+**Step 1 — the one check that could invalidate everything, run it first.**
+`scripts/check_orientation_consistency.py` was never run against real
+data (no access to it from the dev machine). This takes under a minute
+and the answer changes what round 8's "genuinely undertrained, not a bug"
+conclusion is worth:
+```
+python -m scripts.check_orientation_consistency \
+    --synthrad_mr /kaggle/input/datasets/fd7akxj65n5yjxwds/synthrad-2023/Task1/brain/<any_patient>/mr.nii \
+    --brats_t1 /kaggle/input/datasets/awsaf49/brats20-dataset-training-validation/BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData/<any_patient>/<any_patient>_t1.nii \
+    --synthrad_ct /kaggle/input/datasets/fd7akxj65n5yjxwds/synthrad-2023/Task1/brain/<same_patient>/ct.nii
+```
+If it reports a large direction-matrix mismatch, that's a real, separate
+bug worth fixing (add `sitk.DICOMOrient` to both loaders) before spending
+more GPU time on either pipeline below — a conditioning mismatch would
+explain poor quality regardless of how much more training either pipeline
+gets. If directions match closely, round 8's conclusion stands as-is.
 
-If resuming after a crash or context reset: run `git log --oneline` to see
-what's actually committed (this file is updated alongside commits but can
-lag if a session ends abruptly), then re-read the "Status" section above.
+**Step 2 — decision point: 3D fix vs. 2D pipeline. My honest
+recommendation: start the 2D pipeline, let 3D keep training in parallel
+if a second GPU session is available.** Reasoning, not just a coin flip:
+round 8's audit found the 3D checkpoint is genuinely undertrained, not
+buggy — the actual fix is "more steps," and 3D's per-step cost is the
+whole reason that's been hard to get (this is exactly why goal was changed
+to build the 2D pipeline in the first place). The 2D pipeline was
+specifically designed to sidestep that cost (full-resolution pixel-space
+diffusion on cheap 2D slices instead of full 3D volumes), so it's the
+faster path to a real answer on whether the paired-translation approach
+converges to something demonstrable at all, before sinking more hours into
+the slower 3D loop. It has never touched a real GPU or real data, so
+budget time for the smoke test below to surface anything Kaggle-specific
+(memory, real dataset quirks) the same way the 3D pipeline needed several
+rounds of that. The 2×T4 setup mentioned earlier in this file (see the
+round-4 dual-GPU note) means both can genuinely run at once if wanted —
+2D on one session, 3D continuing on the other — rather than choosing
+between them.
+
+Commands, in order:
+```
+# 2D smoke test first -- mirrors the 3D pipeline's own first-smoke-test pattern
+python -m training.train_stage1_2d --config configs/stage1_synthrad_2d.yaml --max_steps 100 --max_patients 3
+# watch nvidia-smi during this run the same way the 3D pipeline's first smoke test did
+
+# if that's clean, start a real run (interrupt anytime, checkpointed every 1000 steps by default)
+python -m training.train_stage1_2d --config configs/stage1_synthrad_2d.yaml
+
+# 3D: if continuing in a second session, no command change needed, same as before
+python -m training.train_stage1 --config configs/stage1_synthrad.yaml
+```
+
+**Step 3 — as either pipeline produces new checkpoints, re-run the
+diagnostic scripts already built** rather than eyeballing raw output:
+```
+python -m inference.compare_synthrad_val --config configs/stage1_synthrad.yaml --num_patients 3
+# (there is no 2D equivalent of compare_synthrad_val yet -- would need a small
+# adaptation since the 2D model's sample() takes a single slice, not a volume;
+# not built tonight, flagged here rather than left silently missing)
+```
+
+**Step 4 — once a checkpoint (2D or 3D) looks genuinely good** (foreground
+PSNR meaningfully above the ~13 dB "flat background guess" baseline from
+the round-8 audit, ideally approaching the "blurred-but-correct" ~25 dB
+ballpark from that same calibration), regenerate the BraTS dataset:
+```
+python -m inference.run_stage2_brats --config configs/stage2_inference_brats.yaml --overwrite
+```
+`--overwrite` matters here since the existing output was generated from
+the undertrained step-9000 checkpoint — rerunning without it would just
+skip everything as "already done." Check the auto-generated
+`README.md`/`metadata.json` in the output directory afterward — they'll
+reflect the new checkpoint's provenance automatically.
+
+**Manual Kaggle checkpoint-persistence steps (unchanged, still required
+every session):**
+1. Train normally. Checkpoints accumulate in `/kaggle/working/checkpoints/...`.
+2. Before a session ends: **Save Version → Save & Run All (Commit)**.
+3. Next session: **Add Input → Notebook Output Files** → pick that version.
+4. Add the mounted path to `checkpoint.extra_resume_dirs` in the relevant
+   config (3D or 2D — they're independent). Rerun the same training
+   command — it auto-detects and resumes from the highest-step checkpoint
+   across all listed directories.
+5. Repeat each session.
