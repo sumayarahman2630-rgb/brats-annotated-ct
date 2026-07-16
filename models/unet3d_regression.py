@@ -129,6 +129,72 @@ class UNet3DRegression(nn.Module):
 
         return torch.tanh(self.out_conv(h))
 
+    @torch.no_grad()
+    def predict_full_volume(
+        self,
+        mri: torch.Tensor,
+        patch_size: tuple[int, int, int],
+        stride_ratio: float = 0.5,
+    ) -> torch.Tensor:
+        """Sliding-window inference for volumes bigger than what fits in a
+        single forward pass. A real full brain-crop volume OOM'd on a real
+        Kaggle T4 (2026-07-16) even under torch.no_grad() + AMP -- this is
+        this architecture's genuine peak-activation-memory ceiling at full
+        resolution, not a training-vs-eval-mode bug (training itself never
+        OOM'd, because it only ever saw patch_size-sized inputs). The fix
+        used for the cheap in-training validation check (just center-crop
+        to a patch) doesn't work here: Stage 2's deliverable and the val
+        comparison script both need the WHOLE brain's output, not a crop
+        of it.
+
+        Splits `mri` (1, 1, D, H, W) into overlapping patch_size windows,
+        runs forward() on each independently (same bounded, patch-scale
+        memory footprint training already proved safe), and blends
+        overlapping regions by uniform averaging. stride_ratio=0.5 (50%
+        overlap) matches the common default for sliding-window medical
+        image inference (e.g. MONAI) -- lower it (e.g. 0.75, less overlap)
+        for faster but slightly seamier output if a full cohort run is
+        time-constrained.
+        """
+        self.eval()
+        _, _, D, H, W = mri.shape
+        pd, ph, pw = patch_size
+        stride = (
+            max(1, int(pd * stride_ratio)),
+            max(1, int(ph * stride_ratio)),
+            max(1, int(pw * stride_ratio)),
+        )
+
+        def starts(size: int, patch: int, step: int) -> list[int]:
+            if size <= patch:
+                return [0]
+            pts = list(range(0, size - patch + 1, step))
+            if pts[-1] != size - patch:
+                pts.append(size - patch)
+            return pts
+
+        d_starts = starts(D, pd, stride[0])
+        h_starts = starts(H, ph, stride[1])
+        w_starts = starts(W, pw, stride[2])
+
+        accum = torch.zeros_like(mri)
+        weight = torch.zeros_like(mri)
+
+        for d0 in d_starts:
+            for h0 in h_starts:
+                for w0 in w_starts:
+                    d1, h1, w1 = min(d0 + pd, D), min(h0 + ph, H), min(w0 + pw, W)
+                    patch = mri[:, :, d0:d1, h0:h1, w0:w1]
+                    pad = (0, pw - (w1 - w0), 0, ph - (h1 - h0), 0, pd - (d1 - d0))
+                    if any(p != 0 for p in pad):
+                        patch = torch.nn.functional.pad(patch, pad, mode="constant", value=-1.0)
+                    pred_patch = self.forward(patch)
+                    pred_patch = pred_patch[:, :, : (d1 - d0), : (h1 - h0), : (w1 - w0)]
+                    accum[:, :, d0:d1, h0:h1, w0:w1] += pred_patch
+                    weight[:, :, d0:d1, h0:h1, w0:w1] += 1.0
+
+        return accum / weight.clamp_min(1.0)
+
 
 def build_regression_model(config: dict) -> UNet3DRegression:
     model_cfg = config["model"]

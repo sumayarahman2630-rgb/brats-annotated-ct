@@ -10,13 +10,12 @@ Deliberately uses RAW checkpoint weights only, same anti-EMA-contamination
 pattern as compare_synthrad_val.py (see CLAUDE.md round 6): no EMA object
 is constructed here at all.
 
-Inference runs on each val patient's FULL cropped volume (not a 96x96x64
-patch) -- the model is fully convolutional so this works architecturally,
-but it is a train-on-patches/infer-on-full-volumes shift that has not been
-verified on a real GPU (memory footprint at full-volume size is unverified;
-if it OOMs, the fallback is adding a sliding-window/patch-stitching
-inference pass, not implemented here since it's extra complexity not
-needed unless the direct approach fails).
+Inference runs on each val patient's FULL cropped volume via sliding-window
+prediction (models/unet3d_regression.py's predict_full_volume) -- a direct
+single-forward-pass full-volume call OOM'd on a real Kaggle T4 (2026-07-16,
+during training's own periodic validation), so this always tiles the volume
+into patch_size windows (data.patch_size) with 50% overlap and blends the
+result, same bounded memory footprint training already proved safe.
 
 Run as:
     python -m inference.visualize_regression_val --config configs/stage1_regression.yaml --num_patients 5
@@ -91,6 +90,10 @@ def main():
     ct_clip_range = tuple(config["data"].get("ct_clip_range", (-1000.0, 3000.0)))
     data_range_hu = ct_clip_range[1] - ct_clip_range[0]
     num_patients = args.num_patients or len(val_loader.dataset)
+    patch_size = config["data"].get("patch_size")
+    patch_size = tuple(patch_size) if patch_size else None
+    if patch_size is None:
+        raise RuntimeError("data.patch_size must be set in the config -- it's reused as the sliding-window size for full-volume inference.")
 
     os.makedirs(args.output_dir, exist_ok=True)
     results = []
@@ -103,8 +106,11 @@ def main():
         real_ct_norm = batch["ct"].squeeze(0).squeeze(0).numpy()
         mask_arr = batch["mask"].squeeze(0).squeeze(0).numpy().astype(bool)
 
-        with torch.no_grad():
-            pred_norm = model(mri)
+        # Full-volume, not a single forward() call: a full brain-crop volume OOM'd on a
+        # real Kaggle T4 even under no_grad + AMP (see models/unet3d_regression.py's
+        # predict_full_volume docstring) -- sliding-window inference keeps peak memory
+        # bounded to patch_size regardless of how large the actual volume is.
+        pred_norm = model.predict_full_volume(mri, patch_size=patch_size)
         l1_norm = F.l1_loss(pred_norm, batch["ct"].to(device)).item()
         pred_norm = pred_norm.squeeze(0).squeeze(0).float().cpu().numpy()
 

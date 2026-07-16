@@ -1,0 +1,26 @@
+# Stage 2 (synthetic CT generation from BraTS T1 volumes), regression-model
+# variant of configs/stage2_inference_brats.yaml. Same BraTS path/layout
+# assumptions -- see that file's header comment and CLAUDE.md's "Kaggle
+# dataset paths" section, unchanged here.
+
+stage1_config: "configs/stage1_regression.yaml"   # regression checkpoint + architecture + preprocessing params
+
+brats_root: "/kaggle/input/datasets/awsaf49/brats20-dataset-training-validation/BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData"
+output_dir: "/kaggle/working/synthetic_ct_dataset_regression"   # separate from the diffusion pipeline's output -- never collides
+
+checkpoint_dir: null   # override; defaults to stage1_config's checkpoint.working_dir + extra_resume_dirs
+# use_ema: false, deliberately -- the reported val PSNR (28.21 dB, 2026-07-16) was measured
+# on raw weights (both training's own quick_validation and visualize_regression_val.py always
+# evaluate ema=None), so raw weights are the exact weights already validated as good. EMA at
+# 20000 steps / ema_decay=0.999 (~1000-step time constant) should be well converged and could
+# plausibly be as good or better, but hasn't been measured -- flip to true only after comparing
+# it against raw weights on the val set first (not done tonight, time-constrained).
+use_ema: false
+# Sliding-window stride as a fraction of data.patch_size (see models/unet3d_regression.py's
+# predict_full_volume) -- 0.5 = stride is half the patch size = 50% overlap between windows
+# (MONAI's common default). LOWER values mean MORE overlap (smoother blending, more forward
+# passes, slower); RAISE toward 1.0 (no overlap) for a faster but seamier full-cohort run if
+# time-constrained.
+stride_ratio: 0.5
+overwrite: false
+limit: null              # e.g. 5, to smoke-test generation on a handful of patients before running the full cohort
