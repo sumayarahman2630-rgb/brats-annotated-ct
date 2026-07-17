@@ -95,7 +95,7 @@ def _base_stage1_config(tmp_path, synthrad_root):
 
 @pytest.mark.slow
 def test_synthetic_ct_lands_correctly_in_full_brats_grid(tmp_path):
-    repo_root = str(Path(__file__).resolve().parents[1])
+    repo_root = str(Path(__file__).resolve().parents[2])
 
     synthrad_root = _write_fake_synthrad(tmp_path / "fake_synthrad", ["P001", "P002", "P003", "P004"])
     stage1_config = _base_stage1_config(tmp_path, synthrad_root)
@@ -104,7 +104,7 @@ def test_synthetic_ct_lands_correctly_in_full_brats_grid(tmp_path):
         yaml.safe_dump(stage1_config, f)
 
     train_result = subprocess.run(
-        [sys.executable, "-m", "training.train_stage1", "--config", str(stage1_cfg_path)],
+        [sys.executable, "-m", "archive.training.train_stage1", "--config", str(stage1_cfg_path)],
         cwd=repo_root, capture_output=True, text=True, timeout=120,
     )
     assert train_result.returncode == 0, train_result.stderr
@@ -124,7 +124,7 @@ def test_synthetic_ct_lands_correctly_in_full_brats_grid(tmp_path):
         yaml.safe_dump(stage2_config, f)
 
     infer_result = subprocess.run(
-        [sys.executable, "-m", "inference.run_stage2_brats", "--config", str(stage2_cfg_path)],
+        [sys.executable, "-m", "archive.inference.run_stage2_brats", "--config", str(stage2_cfg_path)],
         cwd=repo_root, capture_output=True, text=True, timeout=120,
     )
     assert infer_result.returncode == 0, infer_result.stderr

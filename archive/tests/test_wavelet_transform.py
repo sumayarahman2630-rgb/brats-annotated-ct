@@ -3,7 +3,7 @@ done at the very start of this project. CPU-only, no GPU required.
 """
 import torch
 
-from models.wavelet_transform import haar_dwt3d, haar_idwt3d
+from archive.models.wavelet_transform import haar_dwt3d, haar_idwt3d
 
 
 def test_shape():

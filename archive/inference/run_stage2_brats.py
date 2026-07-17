@@ -40,7 +40,7 @@ import yaml
 
 from data.loaders_brats import BraTSVolumeDataset, discover_brats_patients
 from data.preprocessing import denormalize_ct, pad_or_crop_to_shape, resample_to_spacing
-from models.stage1_mri2ct_ddpm import build_stage1_model
+from archive.models.stage1_mri2ct_ddpm import build_stage1_model
 from training.checkpoint import find_latest_checkpoint, load_checkpoint
 from training.ema import EMA
 

@@ -23,8 +23,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.unet3d import UNet3D
-from models.wavelet_transform import haar_dwt3d, haar_idwt3d
+from archive.models.unet3d import UNet3D
+from archive.models.wavelet_transform import haar_dwt3d, haar_idwt3d
 
 SUBBAND_NAMES = ["LLL", "LLH", "LHL", "LHH", "HLL", "HLH", "HHL", "HHH"]
 

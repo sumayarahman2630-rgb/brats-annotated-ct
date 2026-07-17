@@ -1,12 +1,14 @@
-"""Simple 3D regression U-Net for direct MRI -> CT translation: plain
-encoder-decoder with skip connections, L1 loss (computed by the caller),
-no diffusion/timestep conditioning at all. Deliberately much simpler than
-models/unet3d.py (no attention, no FiLM timestep embedding, no wavelet
-transform) -- this exists because a plain regression baseline, trained on
-patches, empirically converged far faster than the wavelet diffusion model
-(see CLAUDE.md). No shared code with unet3d.py/unet2d.py, same pipeline-
-isolation reasoning as the 2D pipeline: a bug here can't affect the other
-two model files.
+"""Pipeline role: the model at the center of the active pipeline -- a plain
+3D regression U-Net for direct MRI -> CT translation (encoder-decoder with
+skip connections, L1 loss computed by the caller), no diffusion/timestep
+conditioning at all. Deliberately much simpler than the archived wavelet
+diffusion model (no attention, no FiLM timestep embedding, no wavelet
+transform), and empirically the better result: 28.21 dB foreground PSNR on
+held-out validation patients at step 20000, vastly ahead of the diffusion
+checkpoint's ~9 dB (see CLAUDE.md and the main README for the comparison).
+No shared code with the archived models -- same pipeline-isolation
+reasoning throughout this project: a bug here can't affect archived code,
+and vice versa.
 """
 from __future__ import annotations
 
@@ -45,6 +47,9 @@ class ConvBlock3D(nn.Module):
 
 
 class Down3D(nn.Module):
+    """Halves spatial resolution via a stride-2 conv (learned downsampling,
+    not a fixed pooling op)."""
+
     def __init__(self, channels: int):
         super().__init__()
         self.op = nn.Conv3d(channels, channels, kernel_size=3, stride=2, padding=1)
@@ -54,6 +59,9 @@ class Down3D(nn.Module):
 
 
 class Up3D(nn.Module):
+    """Doubles spatial resolution via nearest-neighbor upsample + conv
+    (avoids the checkerboard artifacts transposed conv can introduce)."""
+
     def __init__(self, channels: int):
         super().__init__()
         self.conv = nn.Conv3d(channels, channels, kernel_size=3, padding=1)
@@ -84,6 +92,12 @@ class UNet3DRegression(nn.Module):
         channel_mult: tuple[int, ...] = (1, 2, 4, 8),
         num_groups: int = 8,
     ):
+        """Builds a symmetric encoder/decoder: len(channel_mult) levels,
+        len(channel_mult)-1 down/up-sample steps, skip connections between
+        matching encoder/decoder levels (standard U-Net topology). The
+        final conv is zero-initialized so the model starts by predicting a
+        flat tanh(0)=0 output rather than noise -- a stable starting point
+        for training."""
         super().__init__()
         self.num_levels = len(channel_mult)
 
@@ -113,6 +127,11 @@ class UNet3DRegression(nn.Module):
         nn.init.zeros_(self.out_conv.bias)
 
     def forward(self, mri: torch.Tensor) -> torch.Tensor:
+        """Single deterministic forward pass: mri -> predicted_ct, same
+        spatial shape in and out (as long as input dims are divisible by
+        2**(num_levels-1), see the class docstring). Encoder pushes onto
+        `skips` on the way down; decoder pops and concatenates them on the
+        way up, standard U-Net skip-connection wiring."""
         h = mri
         skips = []
         for level in range(self.num_levels):
@@ -197,6 +216,9 @@ class UNet3DRegression(nn.Module):
 
 
 def build_regression_model(config: dict) -> UNet3DRegression:
+    """Factory matching every other Stage 1 model file's build_*_model
+    convention -- constructs UNet3DRegression from a config's `model`
+    section so nothing about the architecture is hardcoded outside the config."""
     model_cfg = config["model"]
     return UNet3DRegression(
         in_channels=1,

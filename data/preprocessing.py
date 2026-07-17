@@ -1,9 +1,12 @@
-"""Shared preprocessing for both SynthRAD2023 (Stage 1 training) and BraTS
-(Stage 2 inference). Everything here follows SynthRAD2023's official
-preprocessing conventions (resample, clip, mask-based background fill,
-bbox crop) so that Stage 2 inputs are normalized identically to what
-Stage 1 was trained on -- see CLAUDE.md's "domain gap" note for why that
-matters more than usual for this project.
+"""Pipeline role: the single shared preprocessing module every data loader
+(SynthRAD, BraTS) and both Stage 1/Stage 2 scripts import from -- resample,
+HU clip/normalize, MRI percentile-normalize, brain-mask apply/crop/pad.
+Having exactly one implementation of each of these is what guarantees
+Stage 2's BraTS input is normalized identically to what Stage 1 trained on
+(see CLAUDE.md's "domain gap" note for why that match matters here more
+than in a typical pipeline). Everything here follows SynthRAD2023's
+official preprocessing conventions (resample, clip, mask-based background
+fill, bbox crop).
 """
 from __future__ import annotations
 
@@ -17,10 +20,12 @@ NORMALIZED_BACKGROUND = -1.0
 
 
 def read_image(path: str) -> sitk.Image:
+    """Thin wrapper over sitk.ReadImage that accepts Path objects too."""
     return sitk.ReadImage(str(path))
 
 
 def write_image(image: sitk.Image, path: str) -> None:
+    """Thin wrapper over sitk.WriteImage that accepts Path objects too."""
     sitk.WriteImage(image, str(path))
 
 
@@ -54,6 +59,7 @@ def resample_to_spacing(
 
 
 def clip_ct_hu(array: np.ndarray, low: float = CT_CLIP_LOW, high: float = CT_CLIP_HIGH) -> np.ndarray:
+    """Clamp raw HU values to [low, high] before normalization."""
     return np.clip(array, low, high)
 
 
@@ -102,6 +108,9 @@ def apply_mask(
     mask: np.ndarray,
     background_value: float,
 ) -> np.ndarray:
+    """Zero out (set to background_value) every voxel outside `mask` -- the
+    core operation behind data.match_brats_domain, since BraTS input is
+    already skull-stripped and SynthRAD training data must match that."""
     return np.where(mask.astype(bool), array, background_value).astype(array.dtype)
 
 
@@ -120,6 +129,7 @@ def bounding_box(mask: np.ndarray, margin: int = 10) -> tuple[tuple[int, int], t
 
 
 def crop_to_box(array: np.ndarray, box: tuple[tuple[int, int], tuple[int, int], tuple[int, int]]) -> np.ndarray:
+    """Slice a 3D array down to the (x0,x1),(y0,y1),(z0,z1) box from bounding_box()."""
     (x0, x1), (y0, y1), (z0, z1) = box
     return array[x0:x1, y0:y1, z0:z1]
 

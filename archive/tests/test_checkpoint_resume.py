@@ -85,9 +85,9 @@ def test_ema_decay_and_subband_weights_survive_resume(tmp_path):
     with open(cfg_path, "w") as f:
         yaml.safe_dump(config, f)
 
-    repo_root = str(__import__("pathlib").Path(__file__).resolve().parents[1])
+    repo_root = str(__import__("pathlib").Path(__file__).resolve().parents[2])
     result1 = subprocess.run(
-        [sys.executable, "-m", "training.train_stage1", "--config", str(cfg_path)],
+        [sys.executable, "-m", "archive.training.train_stage1", "--config", str(cfg_path)],
         cwd=repo_root, capture_output=True, text=True, timeout=120,
     )
     assert result1.returncode == 0, result1.stderr
@@ -100,7 +100,7 @@ def test_ema_decay_and_subband_weights_survive_resume(tmp_path):
         yaml.safe_dump(config, f)
 
     result2 = subprocess.run(
-        [sys.executable, "-m", "training.train_stage1", "--config", str(cfg_path)],
+        [sys.executable, "-m", "archive.training.train_stage1", "--config", str(cfg_path)],
         cwd=repo_root, capture_output=True, text=True, timeout=120,
     )
     assert result2.returncode == 0, result2.stderr

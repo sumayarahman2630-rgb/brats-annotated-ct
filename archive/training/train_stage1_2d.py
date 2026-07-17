@@ -1,14 +1,15 @@
-"""Stage 1 training entry point: MRI -> CT wavelet diffusion on the full
-SynthRAD2023 brain cohort. Run as:
+"""2D counterpart to training/train_stage1.py: trains the standalone 2D
+slice-based MRI -> CT diffusion model. Run as:
 
-    python -m training.train_stage1 --config configs/stage1_synthrad.yaml
+    python -m training.train_stage1_2d --config configs/stage1_synthrad_2d.yaml
 
-Resumability (see CLAUDE.md for the full explanation): on startup this
-script searches checkpoint.working_dir plus every directory listed in
-checkpoint.extra_resume_dirs for the checkpoint with the highest step
-count, and resumes from it automatically -- exact same code path whether
-that's "the same Kaggle session after an interruption" or "a brand new
-Kaggle session with a previous session's Output mounted as an input."
+Same resumability design as the 3D script (see CLAUDE.md): auto-detects and
+resumes from the highest-step checkpoint in checkpoint.working_dir plus any
+checkpoint.extra_resume_dirs, works identically whether that's the same
+Kaggle session after an interruption or a fresh session with a previous
+checkpoint mounted as an input. Same --max_steps/--max_patients smoke-test
+overrides, same per-component timing instrumentation, same config-value-
+survives-resume fix for ema_decay as the 3D script (round 6 bug).
 """
 from __future__ import annotations
 
@@ -25,12 +26,12 @@ import numpy as np
 import torch
 import yaml
 
-from data.loaders_synthrad import build_synthrad_dataloaders
-from models.stage1_mri2ct_ddpm import SUBBAND_NAMES, build_stage1_model
+from archive.data.loaders_synthrad_2d import build_synthrad_2d_dataloaders
+from archive.models.stage1_mri2ct_ddpm_2d import build_stage1_model_2d
 from training.checkpoint import find_latest_checkpoint, load_checkpoint, save_checkpoint
 from training.ema import EMA
 
-log = logging.getLogger("train_stage1")
+log = logging.getLogger("train_stage1_2d")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
@@ -55,10 +56,6 @@ def build_lr_lambda(warmup_steps: int, total_steps: int, schedule: str):
 
 
 class CycleLoader:
-    """Wraps a DataLoader so it can be pulled from indefinitely, re-shuffling
-    each time it's exhausted -- training here is step-based (total_steps),
-    not epoch-based, since a full SynthRAD epoch may already be long."""
-
     def __init__(self, loader):
         self.loader = loader
         self._iter = iter(loader)
@@ -77,38 +74,28 @@ def init_log_file(path: str, resuming: bool) -> None:
         return
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(
-            ["step", "split", "loss", "lr", "elapsed_sec", "data_sec", "fwd_sec", "bwd_sec", "opt_sec"]
-            + [f"mse_{n}" for n in SUBBAND_NAMES]
-        )
+        writer.writerow(["step", "split", "loss", "lr", "elapsed_sec", "data_sec", "fwd_sec", "bwd_sec", "opt_sec"])
 
 
 def append_log_row(
     path: str, step: int, split: str, loss: float, lr: float, elapsed: float,
-    per_subband, data_sec: float = 0.0, fwd_sec: float = 0.0, bwd_sec: float = 0.0, opt_sec: float = 0.0,
+    data_sec: float = 0.0, fwd_sec: float = 0.0, bwd_sec: float = 0.0, opt_sec: float = 0.0,
 ) -> None:
     with open(path, "a", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(
-            [step, split, f"{loss:.6f}", f"{lr:.8f}", f"{elapsed:.1f}",
-             f"{data_sec:.3f}", f"{fwd_sec:.3f}", f"{bwd_sec:.3f}", f"{opt_sec:.3f}"]
-            + [f"{v:.6f}" for v in per_subband.tolist()]
-        )
+        writer.writerow([step, split, f"{loss:.6f}", f"{lr:.8f}", f"{elapsed:.1f}",
+                          f"{data_sec:.3f}", f"{fwd_sec:.3f}", f"{bwd_sec:.3f}", f"{opt_sec:.3f}"])
 
 
 def _sync(device: torch.device) -> None:
-    """CUDA ops queue asynchronously -- without this, time.time() around a GPU op
-    mostly measures how fast the CPU can enqueue work, not how long the GPU took,
-    and the real cost just shows up misattributed to whatever's timed next."""
     if device.type == "cuda":
         torch.cuda.synchronize()
 
 
 @torch.no_grad()
-def quick_validation_loss(model, val_cycle: CycleLoader, device, num_batches: int, amp_enabled: bool):
+def quick_validation_loss(model, val_cycle: CycleLoader, device, num_batches: int, amp_enabled: bool) -> float:
     model.eval()
     total_loss = 0.0
-    total_subband = torch.zeros(8)
     autocast_ctx = torch.amp.autocast("cuda", enabled=amp_enabled) if device.type == "cuda" else nullcontext()
     for _ in range(num_batches):
         batch = val_cycle.next()
@@ -116,22 +103,17 @@ def quick_validation_loss(model, val_cycle: CycleLoader, device, num_batches: in
         with autocast_ctx:
             losses = model.training_losses(mri, ct)
         total_loss += losses["loss"].item()
-        total_subband += losses["per_subband_mse"].float().cpu()
     model.train()
-    return total_loss / num_batches, total_subband / num_batches
+    return total_loss / num_batches
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=str, default="configs/stage1_synthrad.yaml")
+    parser.add_argument("--config", type=str, default="configs/stage1_synthrad_2d.yaml")
     parser.add_argument("--max_steps", type=int, default=None,
-                         help="Smoke-test override: run only this many steps instead of training.total_steps "
-                              "from the config, without editing the file.")
+                         help="Smoke-test override: run only this many steps instead of training.total_steps.")
     parser.add_argument("--max_patients", type=int, default=None,
-                         help="Smoke-test override: use only this many discovered patients instead of "
-                              "data.max_patients from the config, without editing the file. "
-                              "e.g. --max_steps 100 --max_patients 3 for a quick GPU/OOM check "
-                              "before a full run on the full cohort.")
+                         help="Smoke-test override: use only this many discovered patients instead of data.max_patients.")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -144,10 +126,6 @@ def main():
         config["data"]["max_patients"] = args.max_patients
         log.info("--max_patients override: data.max_patients = %d", args.max_patients)
 
-    # A smoke-test total_steps can be far smaller than the configured checkpoint/val
-    # intervals (e.g. total_steps=100 but checkpoint_interval=1000) -- clamp both down
-    # so a short run still actually exercises a checkpoint save and a validation pass,
-    # which is the whole point of running it.
     total_steps = config["training"]["total_steps"]
     config["training"]["checkpoint_interval"] = min(config["training"]["checkpoint_interval"], total_steps)
     config["training"]["val_interval"] = min(config["training"].get("val_interval", total_steps), total_steps)
@@ -157,21 +135,18 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info("Using device: %s", device)
     if device.type != "cuda":
-        log.warning("No CUDA GPU detected -- training will be extremely slow. "
-                    "This is expected on a local machine; run on a Kaggle GPU session for real training.")
+        log.warning("No CUDA GPU detected -- training will be slow. Expected on a local machine; use a Kaggle GPU for real training.")
 
-    train_loader, val_loader = build_synthrad_dataloaders(config, seed=config.get("seed", 0))
+    train_loader, val_loader = build_synthrad_2d_dataloaders(config, seed=config.get("seed", 0))
     train_cycle = CycleLoader(train_loader)
     val_cycle = CycleLoader(val_loader)
 
-    model = build_stage1_model(config).to(device)
+    model = build_stage1_model_2d(config).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     log.info("Model parameter count: %.1fM", n_params / 1e6)
 
     train_cfg = config["training"]
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=train_cfg["lr"], weight_decay=train_cfg.get("weight_decay", 0.0)
-    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg["lr"], weight_decay=train_cfg.get("weight_decay", 0.0))
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
         build_lr_lambda(train_cfg.get("warmup_steps", 0), train_cfg["total_steps"], train_cfg.get("lr_schedule", "cosine")),
@@ -188,31 +163,10 @@ def main():
     global_step = 0
     if latest_ckpt is not None:
         global_step, _extra = load_checkpoint(latest_ckpt, model, ema, optimizer, scheduler, map_location=device.type)
-        # EMA.load_state_dict overwrites ema.decay with whatever the checkpoint stored --
-        # without this, changing training.ema_decay in the config would be silently
-        # ignored on resume. Let the current config win, so continued-training runs can
-        # actually adjust it (e.g. lowering it so EMA converges faster on a short
-        # continuation, instead of staying stuck at whatever decay the original run used).
+        # Same class of bug as the 3D script's round-6 fix: ema.decay is silently
+        # restored from the checkpoint by EMA.load_state_dict otherwise.
         ema.decay = train_cfg.get("ema_decay", 0.9999)
-        # Same class of bug, second instance: subband_loss_weights is a registered buffer
-        # on the model (models/stage1_mri2ct_ddpm.py), so model.load_state_dict() just
-        # silently restored it from the checkpoint too -- unlike the diffusion-schedule
-        # buffers (betas etc.), this one is always shape (8,) regardless of its actual
-        # values, so there's no shape-mismatch error to catch the problem; it just quietly
-        # keeps whatever weights were checkpointed. Concretely: the round-6 LLL-weighted
-        # config change ([3,1,1,1,1,1,1,1]) never actually took effect during the
-        # 5500->5750 continuation -- the model kept training with the original equal
-        # weights the whole time, silently. Re-apply from config, same fix as ema.decay.
-        diff_cfg = config["diffusion"]
-        new_weights = diff_cfg.get("subband_loss_weights")
-        if new_weights is not None:
-            model.subband_loss_weights.copy_(
-                torch.tensor(new_weights, dtype=model.subband_loss_weights.dtype, device=model.subband_loss_weights.device)
-            )
-        log.info(
-            "Resumed from checkpoint %s at step %d (ema.decay=%.4f, subband_loss_weights=%s)",
-            latest_ckpt, global_step, ema.decay, model.subband_loss_weights.tolist(),
-        )
+        log.info("Resumed from checkpoint %s at step %d (ema.decay=%.4f)", latest_ckpt, global_step, ema.decay)
     else:
         log.info("No checkpoint found in %s -- starting from scratch", search_dirs)
 
@@ -235,7 +189,6 @@ def main():
     while global_step < total_steps:
         optimizer.zero_grad(set_to_none=True)
         accumulated_loss = 0.0
-        accumulated_subband = torch.zeros(8)
         data_sec = fwd_sec = bwd_sec = opt_sec = 0.0
 
         for _ in range(grad_accum_steps):
@@ -258,7 +211,6 @@ def main():
             bwd_sec += time.time() - t0
 
             accumulated_loss += losses["loss"].item() / grad_accum_steps
-            accumulated_subband += losses["per_subband_mse"].float().cpu() / grad_accum_steps
 
         t0 = time.time()
         scaler.unscale_(optimizer)
@@ -279,15 +231,15 @@ def main():
                 "step %d/%d  loss=%.5f  lr=%.2e  elapsed=%.0fs  |  data=%.2fs fwd=%.2fs bwd=%.2fs opt=%.2fs (this step)",
                 global_step, total_steps, accumulated_loss, lr, elapsed, data_sec, fwd_sec, bwd_sec, opt_sec,
             )
-            append_log_row(log_file, global_step, "train", accumulated_loss, lr, elapsed, accumulated_subband,
+            append_log_row(log_file, global_step, "train", accumulated_loss, lr, elapsed,
                             data_sec=data_sec, fwd_sec=fwd_sec, bwd_sec=bwd_sec, opt_sec=opt_sec)
 
         if global_step % val_interval == 0:
-            val_loss, val_subband = quick_validation_loss(model, val_cycle, device, val_batches, amp_enabled)
+            val_loss = quick_validation_loss(model, val_cycle, device, val_batches, amp_enabled)
             elapsed = time.time() - t_start
             lr = scheduler.get_last_lr()[0]
             log.info("step %d  val_loss=%.5f", global_step, val_loss)
-            append_log_row(log_file, global_step, "val", val_loss, lr, elapsed, val_subband)
+            append_log_row(log_file, global_step, "val", val_loss, lr, elapsed)
 
         if global_step % checkpoint_interval == 0 or global_step >= total_steps:
             path = save_checkpoint(

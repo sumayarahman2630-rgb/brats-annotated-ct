@@ -66,9 +66,9 @@ def test_2d_pipeline_trains_checkpoints_and_resumes(tmp_path):
     with open(cfg_path, "w") as f:
         yaml.safe_dump(config, f)
 
-    repo_root = str(Path(__file__).resolve().parents[1])
+    repo_root = str(Path(__file__).resolve().parents[2])
     result1 = subprocess.run(
-        [sys.executable, "-m", "training.train_stage1_2d", "--config", str(cfg_path)],
+        [sys.executable, "-m", "archive.training.train_stage1_2d", "--config", str(cfg_path)],
         cwd=repo_root, capture_output=True, text=True, timeout=120,
     )
     assert result1.returncode == 0, result1.stderr
@@ -79,7 +79,7 @@ def test_2d_pipeline_trains_checkpoints_and_resumes(tmp_path):
         yaml.safe_dump(config, f)
 
     result2 = subprocess.run(
-        [sys.executable, "-m", "training.train_stage1_2d", "--config", str(cfg_path)],
+        [sys.executable, "-m", "archive.training.train_stage1_2d", "--config", str(cfg_path)],
         cwd=repo_root, capture_output=True, text=True, timeout=120,
     )
     assert result2.returncode == 0, result2.stderr

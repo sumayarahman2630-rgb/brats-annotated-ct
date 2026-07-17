@@ -30,7 +30,7 @@ import yaml
 
 from data.loaders_synthrad import build_synthrad_dataloaders
 from data.preprocessing import denormalize_ct
-from models.stage1_mri2ct_ddpm import build_stage1_model
+from archive.models.stage1_mri2ct_ddpm import build_stage1_model
 from training.checkpoint import find_latest_checkpoint, load_checkpoint
 
 log = logging.getLogger("compare_synthrad_val")

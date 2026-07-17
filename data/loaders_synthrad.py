@@ -1,4 +1,10 @@
-"""Dataset for the full SynthRAD2023 brain MRI-CT cohort.
+"""Pipeline role: the Stage 1 training data source -- discovers SynthRAD2023
+brain patients, preprocesses each MRI/CT/mask triple (resample, brain-mask,
+crop, normalize, pad), and builds the train/val DataLoaders every Stage 1
+training script (the active regression one and the archived diffusion one)
+consumes identically. This is the one place patient-level train/val
+splitting happens, so it's worth reading build_synthrad_dataloaders's
+docstring below before touching it.
 
 Confirmed exact layout (2026-07-15): every immediate subfolder of
 data.synthrad_root (.../synthrad-2023/Task1/brain) is either a patient
@@ -43,6 +49,8 @@ _MASK_RE = re.compile(r"(^|_)mask(\.nii(\.gz)?)$", re.IGNORECASE)
 
 @dataclass
 class SynthRADPatient:
+    """One discovered patient's file paths -- what discover_synthrad_patients
+    returns and what SynthRADBrainDataset consumes."""
     patient_id: str
     ct_path: str
     mr_path: str
@@ -107,6 +115,13 @@ def discover_synthrad_patients(root: str, region: str | None = None) -> list[Syn
 
 
 class SynthRADBrainDataset(Dataset):
+    """One patient in, one preprocessed (mri, ct, mask) tensor triple out.
+    Preprocessing order matters and mirrors SynthRAD2023's own convention:
+    resample -> (optional) mask both modalities to brain-only -> crop to
+    the mask's bounding box -> normalize -> pad to a clean multiple. Every
+    Stage 1 config (regression or diffusion) constructs this class the same
+    way via build_synthrad_dataloaders below."""
+
     def __init__(
         self,
         patients: list[SynthRADPatient],
@@ -135,6 +150,11 @@ class SynthRADBrainDataset(Dataset):
         return len(self.patients)
 
     def _load_and_preprocess(self, patient: SynthRADPatient) -> dict[str, np.ndarray]:
+        """Read one patient's raw NIfTI files and run the full preprocessing
+        chain (resample -> brain-domain mask -> crop -> normalize -> pad),
+        or return the cached result from a prior call if cache_dir is set --
+        this is the expensive part of __getitem__, run once per patient
+        rather than once per epoch."""
         cache_path = self.cache_dir / f"{patient.patient_id}.npz" if self.cache_dir else None
         if cache_path is not None and cache_path.exists():
             data = np.load(cache_path)
@@ -149,6 +169,14 @@ class SynthRADBrainDataset(Dataset):
         mask_img = resample_to_spacing(sitk.ReadImage(patient.mask_path), self.target_spacing, is_mask=True, default_value=0.0)
         mask_arr = sitk.GetArrayFromImage(mask_img).astype(np.uint8)
 
+        # Brain-domain masking (data.match_brats_domain, default True): SynthRAD MR is
+        # NOT skull-stripped (includes skull/scalp/face), but BraTS T1 -- Stage 2's real
+        # input -- IS skull-stripped. Training on unmasked SynthRAD would teach the model
+        # to hallucinate skull/face structure from an MR channel that's all zeros outside
+        # the brain at Stage 2 inference time. Zeroing both CT and MR to the mask here
+        # makes Stage 1's training distribution match what Stage 2 actually feeds it --
+        # see CLAUDE.md's "domain gap" note, this is a real failure mode, not a
+        # hypothetical one.
         if self.match_brats_domain and np.any(mask_arr):
             ct_arr = apply_mask(ct_arr, mask_arr, background_value=CT_BACKGROUND_HU)
             mr_arr = apply_mask(mr_arr, mask_arr, background_value=0.0)
@@ -172,6 +200,9 @@ class SynthRADBrainDataset(Dataset):
         return out
 
     def __getitem__(self, idx: int) -> dict:
+        """Preprocess (or load cached) patient idx, optionally crop a random
+        training patch out of it, and return torch tensors ready to feed the
+        model. patch_size=None returns the full preprocessed volume."""
         patient = self.patients[idx]
         arrays = self._load_and_preprocess(patient)
         mri, ct, mask = arrays["mri"], arrays["ct"], arrays["mask"]
@@ -188,6 +219,23 @@ class SynthRADBrainDataset(Dataset):
 
 
 def build_synthrad_dataloaders(config: dict, seed: int = 0) -> tuple[DataLoader, DataLoader]:
+    """Discover patients, split them into train/val, and build both
+    DataLoaders -- the standard entry point every Stage 1 training and
+    validation script uses so the split is guaranteed identical everywhere
+    (same seed, same algorithm) rather than each script rolling its own.
+
+    Patient-level split, not image/slice-level: the split happens on the
+    PATIENT LIST before any Dataset is constructed, so every voxel from a
+    given patient goes entirely to train or entirely to val -- never both.
+    This is what makes the split leakage-free; splitting after slicing (or
+    patching) would let one patient's data appear in both sets, silently
+    inflating validation metrics. The split itself is deterministic given
+    `seed` (numpy's default_rng, not Python's random) so re-running with
+    the same seed always reproduces the same train/val patients -- this
+    matters because a training script and a separate validation/analysis
+    script (e.g. inference/visualize_regression_val.py) both call this
+    function independently and must agree on which patients are "unseen."
+    """
     data_cfg = config["data"]
     patients = discover_synthrad_patients(data_cfg["synthrad_root"], region=data_cfg.get("region"))
     if not patients:

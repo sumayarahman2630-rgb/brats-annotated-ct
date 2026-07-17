@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.unet2d import UNet2D
+from archive.models.unet2d import UNet2D
 
 
 def _make_linear_beta_schedule(timesteps: int, beta_start: float, beta_end: float) -> torch.Tensor:

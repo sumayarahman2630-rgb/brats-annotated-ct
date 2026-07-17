@@ -3,7 +3,7 @@ checkpointing correctness. CPU-only, no GPU required.
 """
 import torch
 
-from models.unet3d import UNet3D, _safe_num_groups
+from archive.models.unet3d import UNet3D, _safe_num_groups
 
 
 def test_safe_num_groups_falls_back_when_not_divisible():

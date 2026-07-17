@@ -53,12 +53,18 @@ _SEG_RE = re.compile(r"^(.*)_seg(\.nii(\.gz)?)$", re.IGNORECASE)
 
 @dataclass
 class BraTSPatient:
+    """One discovered patient's file paths. seg_path is None if no matching
+    _seg file was found -- run_stage2_brats_regression.py skips these
+    (nothing to pair a synthetic CT with) rather than treating it as an error."""
     patient_id: str
     t1_path: str
     seg_path: str | None
 
 
 def discover_brats_patients(root: str) -> list[BraTSPatient]:
+    """Walk `root` and group T1/seg files by the patient ID embedded in
+    their filenames (works regardless of directory nesting -- see module
+    docstring for why this differs from loaders_synthrad's approach)."""
     root = str(root)
     t1_by_id: dict[str, str] = {}
     seg_by_id: dict[str, str] = {}
@@ -114,6 +120,11 @@ class BraTSVolumeDataset(Dataset):
         return len(self.patients)
 
     def __getitem__(self, idx: int) -> dict:
+        """Preprocess one BraTS patient's T1 (resample -> crop to
+        foreground bbox -> normalize -> pad) and return it plus the
+        geometry (full_shape, crop_box, cropped_shape, reference_image)
+        Stage 2 needs to paste the model's output back into the original
+        BraTS grid, aligned with the tumor mask."""
         patient = self.patients[idx]
 
         t1_img = resample_to_spacing(sitk.ReadImage(patient.t1_path), self.target_spacing, is_mask=False, default_value=0.0)

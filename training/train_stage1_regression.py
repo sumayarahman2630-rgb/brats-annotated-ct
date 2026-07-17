@@ -54,6 +54,7 @@ except ImportError:
 
 
 def set_seed(seed: int) -> None:
+    """Seed every RNG a training run touches, for reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -61,6 +62,8 @@ def set_seed(seed: int) -> None:
 
 
 def build_lr_lambda(warmup_steps: int, total_steps: int, schedule: str):
+    """Returns a step -> LR-multiplier function for LambdaLR: linear warmup
+    then either constant or cosine decay to 0 by total_steps."""
     def lr_lambda(step: int) -> float:
         if warmup_steps > 0 and step < warmup_steps:
             return step / max(1, warmup_steps)
@@ -74,11 +77,17 @@ def build_lr_lambda(warmup_steps: int, total_steps: int, schedule: str):
 
 
 class CycleLoader:
+    """Wraps a DataLoader so it can be pulled from indefinitely, re-shuffling
+    each time it's exhausted -- training here is step-based (total_steps),
+    not epoch-based."""
+
     def __init__(self, loader):
         self.loader = loader
         self._iter = iter(loader)
 
     def next(self) -> dict:
+        """Return the next batch, transparently starting a new epoch (with
+        a fresh shuffle) if the current one is exhausted."""
         try:
             return next(self._iter)
         except StopIteration:
@@ -87,6 +96,9 @@ class CycleLoader:
 
 
 def init_log_file(path: str, resuming: bool) -> None:
+    """Create the CSV training log with a header row, unless resuming an
+    existing run (in which case the existing file/header is kept and new
+    rows are appended)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if resuming and os.path.exists(path):
         return
@@ -96,6 +108,8 @@ def init_log_file(path: str, resuming: bool) -> None:
 
 
 def append_log_row(path: str, step: int, split: str, l1_loss: float, psnr_fg, lr: float, elapsed: float) -> None:
+    """Append one row (train or val) to the CSV training log -- this is the
+    file analysis/plot_validation_psnr_curve.py reads."""
     with open(path, "a", newline="") as f:
         writer = csv.writer(f)
         psnr_str = f"{psnr_fg:.3f}" if psnr_fg is not None and not math.isnan(psnr_fg) else ""
@@ -228,6 +242,12 @@ def quick_validation(
 
 
 def main():
+    """Parse args/config, build model+data+optimizer, resume from the
+    latest checkpoint if one exists, then run the train loop: forward/
+    backward/step each iteration, periodic logging, checkpoint-then-
+    validate every `checkpoint_interval`/`val_interval` steps (in that
+    order -- see the inline comment at the checkpoint-save call below for
+    why), until training.total_steps is reached."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=str, default="configs/stage1_regression.yaml")
     parser.add_argument("--max_steps", type=int, default=None,

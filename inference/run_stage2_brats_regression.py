@@ -51,6 +51,7 @@ MANIFEST_FIELDS = [
 
 
 def parse_args():
+    """CLI flags -- every one is optional and falls back to --config's value."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", type=str, default="configs/stage2_inference_brats_regression.yaml")
     parser.add_argument("--stage1_config", type=str, default=None, help="Override stage1_config from --config.")
@@ -66,6 +67,8 @@ def parse_args():
 
 
 def resolve_settings(args) -> dict:
+    """Merge --config file values with CLI overrides (CLI wins when given)
+    into one settings dict the rest of main() reads from."""
     stage2_cfg = {}
     if os.path.exists(args.config):
         with open(args.config) as f:
@@ -95,6 +98,8 @@ def resolve_settings(args) -> dict:
 
 
 def init_manifest(path: str) -> None:
+    """Create manifest.csv with a header row if it doesn't already exist
+    (resumed runs append to the same file rather than overwriting it)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if not os.path.exists(path):
         with open(path, "w", newline="") as f:
@@ -102,15 +107,20 @@ def init_manifest(path: str) -> None:
 
 
 def append_manifest_row(path: str, row: dict) -> None:
+    """Record one patient's outcome (success/failed/skipped) in manifest.csv."""
     with open(path, "a", newline="") as f:
         csv.DictWriter(f, fieldnames=MANIFEST_FIELDS).writerow(row)
 
 
 def already_done(output_dir: str, patient_id: str) -> bool:
+    """True if this patient's synthetic CT already exists -- what makes
+    reruns resumable/idempotent without --overwrite."""
     return os.path.exists(os.path.join(output_dir, patient_id, "synthetic_ct.nii.gz"))
 
 
 def write_hu_image(hu_array: np.ndarray, reference_image: sitk.Image, path: str) -> None:
+    """Save an HU-unit array as int16 NIfTI, copying reference_image's
+    spacing/origin/direction so it lines up with the source T1 exactly."""
     img = sitk.GetImageFromArray(hu_array.astype(np.int16))
     img.CopyInformation(reference_image)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -118,6 +128,8 @@ def write_hu_image(hu_array: np.ndarray, reference_image: sitk.Image, path: str)
 
 
 def process_seg_mask(seg_path: str, target_spacing, full_shape, reference_image: sitk.Image, out_path: str) -> None:
+    """Resample the original BraTS tumor mask to the same spacing/grid as
+    the synthetic CT and copy it into the output folder unmodified."""
     seg_img = resample_to_spacing(sitk.ReadImage(seg_path), target_spacing, is_mask=True, default_value=0.0)
     seg_arr = sitk.GetArrayFromImage(seg_img).astype(np.uint8)
     seg_full = pad_or_crop_to_shape(seg_arr, full_shape, pad_value=0)
@@ -128,6 +140,12 @@ def process_seg_mask(seg_path: str, target_spacing, full_shape, reference_image:
 
 
 def place_in_full_canvas(cropped_array: np.ndarray, crop_box, full_shape, fill_value: float) -> np.ndarray:
+    """Inverse of BraTSVolumeDataset's bounding-box crop: paste the model's
+    (cropped-region) output back into a canvas the size of the full
+    resampled T1 grid, so it aligns voxel-for-voxel with the tumor mask.
+    Everywhere outside crop_box -- where the model never generated
+    anything -- gets `fill_value` (pass the normalized background so it
+    denormalizes to exactly CT_BACKGROUND_HU)."""
     canvas = np.full(full_shape, fill_value, dtype=cropped_array.dtype)
     (x0, x1), (y0, y1), (z0, z1) = crop_box
     canvas[x0:x1, y0:y1, z0:z1] = cropped_array
@@ -135,6 +153,8 @@ def place_in_full_canvas(cropped_array: np.ndarray, crop_box, full_shape, fill_v
 
 
 def _git_commit_hash() -> str | None:
+    """Best-effort commit hash for dataset provenance; None if unavailable
+    (not fatal -- this is purely informational)."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5,
@@ -146,6 +166,8 @@ def _git_commit_hash() -> str | None:
 
 
 def write_dataset_metadata(output_dir: str, run_info: dict) -> None:
+    """Write metadata.json -- a machine-readable snapshot of the most
+    recent generation run's settings (checkpoint, stride_ratio, commit)."""
     path = os.path.join(output_dir, "metadata.json")
     with open(path, "w") as f:
         json.dump(run_info, f, indent=2)
@@ -153,6 +175,9 @@ def write_dataset_metadata(output_dir: str, run_info: dict) -> None:
 
 
 def write_dataset_card(output_dir: str, run_info: dict, counts: dict) -> None:
+    """Write README.md into output_dir -- a human-readable dataset card
+    populated with this run's actual numbers, not a template to fill in
+    by hand. Regenerated after every run."""
     total = sum(counts.values())
     lines = [
         "# Synthetic CT dataset generated from BraTS T1 MRI (regression model)",
@@ -223,6 +248,11 @@ def write_dataset_card(output_dir: str, run_info: dict, counts: dict) -> None:
 
 
 def main():
+    """Load the checkpoint, then for every discovered BraTS patient (unless
+    already done or missing a tumor mask): preprocess T1, run sliding-window
+    inference, denormalize to HU, paste back into the full BraTS grid, copy
+    the tumor mask alongside it, and log the outcome to manifest.csv. Writes
+    metadata.json/README.md after the cohort finishes."""
     args = parse_args()
     settings = resolve_settings(args)
 

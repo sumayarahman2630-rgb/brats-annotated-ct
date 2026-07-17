@@ -1,10 +1,9 @@
-"""Diagnostic for the regression U-Net (configs/stage1_regression.yaml):
-real vs. synthetic CT on the FULL held-out validation split, with an error
-map -- the same purpose as inference/compare_synthrad_val.py for the
-diffusion pipeline, but for the regression model. Reuses the exact same
-patient-level split algorithm as training/train_stage1_regression.py (same
-config, same seed) so this is guaranteed to score only patients the model
-never trained on.
+"""Pipeline role: the qualitative + quantitative evidence for the regression
+model's result (28.21 dB foreground PSNR at step 20000) -- real vs.
+synthetic CT on the FULL held-out validation split, with an error map.
+Reuses the exact same patient-level split algorithm as
+training/train_stage1_regression.py (same config, same seed) so this is
+guaranteed to score only patients the model never trained on.
 
 Deliberately uses RAW checkpoint weights only, same anti-EMA-contamination
 pattern as compare_synthrad_val.py (see CLAUDE.md round 6): no EMA object
@@ -41,6 +40,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 
 def parse_args():
+    """CLI flags -- config path plus optional overrides (patient count,
+    output dir, an exact checkpoint to evaluate instead of the latest)."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", type=str, default="configs/stage1_regression.yaml")
     parser.add_argument("--num_patients", type=int, default=None, help="Defaults to the entire val split.")
@@ -51,6 +52,9 @@ def parse_args():
 
 
 def main():
+    """Load the checkpoint (raw weights), run every val patient through
+    sliding-window inference, compute whole-volume + foreground PSNR/SSIM,
+    save a 4-panel comparison image per patient, and print the averages."""
     args = parse_args()
 
     try:
