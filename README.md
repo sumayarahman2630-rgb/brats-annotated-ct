@@ -5,7 +5,7 @@ domains where real annotated CT is scarce.
 
 ## What this project does
 
-Two-stage pipeline:
+Three-stage pipeline:
 
 1. **Stage 1 — MRI → CT translation**, trained on the full SynthRAD2023
    brain cohort (180 patients, paired real MRI/CT). A model learns to
@@ -14,8 +14,16 @@ Two-stage pipeline:
    model to BraTS2020 T1 MRI volumes (369 patients). Each generated CT is
    paired with its source BraTS tumor segmentation mask, under a clear
    `<patient_id>/synthetic_ct.nii.gz` + `<patient_id>/tumor_mask.nii.gz`
-   convention. **This generated dataset is the deliverable** — annotated
-   synthetic CT for tumor-region work.
+   convention. **This is the core deliverable** — annotated synthetic CT
+   for tumor-region work.
+3. **Stage 3 — CT tumor segmentation**, training a binary segmentation
+   model on the Stage 2 output (synthetic CT + tumor mask, binarized from
+   BraTS's multi-class labels), then externally validating it against a
+   small real-CT dataset (Jordan University Hospital, 20 patients) that
+   was never used in training. See PROJECT_NOTES.md's Stage 3 section for
+   the real, load-bearing limitations of that external comparison (format
+   mismatch, incomplete volumes, unverified filename matching) before
+   trusting its numbers.
 
 ## Result
 
@@ -27,7 +35,7 @@ the one that reached a genuinely good result:
 | **Regression U-Net (active)** | **28.21 dB** | L1 loss, direct prediction, 20000 training steps |
 | Wavelet diffusion (archived) | ~9 dB | DDPM, undertrained given the available compute budget |
 
-See [`DEVELOPMENT_LOG.md`](DEVELOPMENT_LOG.md) for the full development narrative — what was
+See [`PROJECT_NOTES.md`](PROJECT_NOTES.md) for the full development narrative — what was
 tried, what broke, and why the simpler model won — and
 [`archive/README.md`](archive/README.md) for why the diffusion approach
 was kept, not deleted.
@@ -50,13 +58,21 @@ SynthRAD2023 MRI + CT (paired, real)
   synthetic CT, paired with the original BraTS tumor mask
         │
         ▼
-  synthetic_ct_dataset_regression/  (the deliverable)
+  synthetic_ct_dataset_regression/  (the core deliverable)
+        │
+        ▼
+  train Stage 3 segmentation U-Net (binarized tumor mask as target)
+        │
+        ├──►  held-out synthetic CT val patients (in-distribution check)
+        │
+        └──►  Jordan Hospital real CT (20 patients, never trained on)
+                external validation -- see PROJECT_NOTES.md for caveats
 ```
 
 ## How to run
 
 Everything below assumes a Kaggle GPU session with the SynthRAD2023 and
-BraTS2020 datasets mounted (see `DEVELOPMENT_LOG.md`'s "Kaggle dataset paths" for
+BraTS2020 datasets mounted (see `PROJECT_NOTES.md`'s "Kaggle dataset paths" for
 the exact confirmed input paths).
 
 **1. Train Stage 1** (smoke-test first, same pattern for any new config):
@@ -84,6 +100,17 @@ python -m analysis.plot_psnr_ssim_distribution --metrics_csv /kaggle/working/ana
 python -m analysis.plot_psnr_vs_ssim_scatter --metrics_csv /kaggle/working/analysis_plots/val_metrics.csv
 ```
 
+**5. Train Stage 3** (segmentation, on the Stage 2 output -- smoke-test first):
+```bash
+python -m training.train_stage3_segmentation --config configs/stage3_ct_segmentation.yaml --max_steps 100 --max_patients 3
+python -m training.train_stage3_segmentation --config configs/stage3_ct_segmentation.yaml
+```
+
+**6. Validate Stage 3 against the Jordan external dataset** (never used in training):
+```bash
+python -m inference.validate_jordan_segmentation --config configs/stage3_ct_segmentation.yaml
+```
+
 Run the test suite (CPU-only, no GPU/real data needed):
 ```bash
 pip install -r requirements.txt
@@ -94,21 +121,27 @@ python -m pytest tests/
 
 ```
 models/unet3d_regression.py           Stage 1 model: plain 3D regression U-Net
+models/unet3d_segmentation.py         Stage 3 model: same U-Net topology, sigmoid output for binary segmentation
 configs/stage1_regression.yaml        Stage 1 hyperparameters
 configs/stage2_inference_brats_regression.yaml   Stage 2 settings
+configs/stage3_ct_segmentation.yaml   Stage 3 hyperparameters + dataset paths (synthetic CT + Jordan)
 training/train_stage1_regression.py   Stage 1 training loop (resumable)
+training/train_stage3_segmentation.py Stage 3 training loop (resumable, Dice+BCE loss, synthetic CT only)
 training/checkpoint.py                shared checkpoint save/load/resume
 training/ema.py                       shared exponential moving average
 inference/visualize_regression_val.py Stage 1 validation: PSNR/SSIM + comparison images
 inference/run_stage2_brats_regression.py   Stage 2: generate the BraTS synthetic-CT dataset
-data/preprocessing.py                 shared HU/MRI normalization, resample, brain-mask, crop/pad
+inference/validate_jordan_segmentation.py  Stage 3 external validation against real Jordan CT
+data/preprocessing.py                 shared HU/MRI normalization, resample, brain-mask, crop/pad, foreground-biased patch crop
 data/loaders_synthrad.py              SynthRAD2023 dataset (Stage 1 training data)
 data/loaders_brats.py                 BraTS2020 dataset (Stage 2 input data)
+data/loaders_synthetic_ct.py          Stage 2 output dataset (Stage 3 training data)
+data/loaders_jordan_ct.py             Jordan Hospital DICOM dataset (Stage 3 external validation only)
 analysis/                             reusable figure/table-generation scripts (see below)
 scripts/check_orientation_consistency.py   diagnostic: NIfTI orientation consistency check
 tests/                                CPU-only test suite for the active pipeline
 archive/                              the original wavelet-diffusion pipeline (superseded, not deleted)
-DEVELOPMENT_LOG.md                    full development narrative, decisions, and status log
+PROJECT_NOTES.md                      full development narrative, decisions, and status log
 ```
 
 ### `analysis/`
@@ -137,6 +170,9 @@ Every script's input/output paths are CLI arguments (`--config`,
   (paired MRI/CT) — Stage 1 training data.
 - [BraTS2020](https://www.med.upenn.edu/cbica/brats2020/) training set
   (T1 MRI + tumor segmentation) — Stage 2 input data.
+- Jordan University Hospital CT + tumor mask (20 patients, DICOM) — Stage 3
+  external validation only, never used in training. See PROJECT_NOTES.md's
+  Stage 3 section for this dataset's format and known limitations.
 
-See `DEVELOPMENT_LOG.md`'s "Kaggle dataset paths" section for the exact confirmed
+See `PROJECT_NOTES.md`'s "Kaggle dataset paths" section for the exact confirmed
 Kaggle input paths used during development.

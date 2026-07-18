@@ -1,0 +1,63 @@
+# Stage 3 (CT -> binary tumor segmentation) config. Trains ONLY on the
+# synthetic CT + tumor mask pairs Stage 2 generated (data.synthetic_ct_root)
+# -- the Jordan hospital dataset (data.jordan_ct_root / jordan_mask_root)
+# is external validation only, read by inference/validate_jordan_segmentation.py,
+# and is never touched by training/train_stage3_segmentation.py. See
+# PROJECT_NOTES.md's Stage 3 section for the full reasoning and the known
+# limitations of the Jordan comparison.
+
+seed: 42
+
+data:
+  # Stage 2's output dataset, re-uploaded as its own Kaggle input. Note the
+  # unusually deep path -- this is Kaggle's own nesting from how the dataset
+  # was originally exported, not something to "fix"; data/loaders_synthetic_ct.py
+  # just needs the exact path to the directory whose immediate children are
+  # per-patient folders.
+  synthetic_ct_root: "/kaggle/input/datasets/sumayarahmanmeherin/annoted-sct/kaggle/input/notebooks/sumayarahmanmeherin/mri-to-ct/synthetic_ct_dataset_regression"
+  # Jordan University Hospital external validation set (20 patients, CT and
+  # mask as separate flat directories of RGB DICOM slices) -- read only by
+  # inference/validate_jordan_segmentation.py, listed here so both the
+  # training config and the validation script share one source of truth.
+  jordan_ct_root: "/kaggle/input/datasets/sumayarahmanmeherin/annoted-20-ct"
+  jordan_mask_root: "/kaggle/input/datasets/sumayarahmanmeherin/mask-data-20"
+
+  ct_clip_range: [-1000.0, 3000.0]     # same HU clip range as Stage 1 -- synthetic CT was generated under this same convention
+  crop_margin: 10
+  spatial_multiple: 16                 # 2^4 (4 U-Net downsamples for model.channel_mult below)
+  patch_size: [96, 96, 64]             # training patches; must each be a multiple of spatial_multiple
+  # Fraction of training patches deliberately centered on a tumor voxel instead
+  # of a uniform-random location (data/preprocessing.py's foreground_biased_patch_crop)
+  # -- a tumor is a tiny fraction of a whole brain volume, so pure random cropping
+  # would mostly yield empty-mask patches and a weak Dice gradient signal.
+  foreground_prob: 0.5
+  max_patients: null
+  train_val_split: 0.9                 # patient-level split, no leakage -- same algorithm as Stage 1
+  num_workers: 4
+
+model:
+  base_channels: 32
+  channel_mult: [1, 2, 4, 8]
+  num_groups: 8
+
+training:
+  batch_size: 2
+  lr: 0.0002
+  weight_decay: 0.0
+  lr_schedule: "cosine"
+  warmup_steps: 200
+  total_steps: 20000
+  bce_weight: 1.0                      # loss = dice_loss + bce_weight * bce_loss; equal weighting by default
+  amp: true
+  grad_clip_norm: 1.0
+  ema_decay: 0.999                      # EMA state saved for reference only -- inference/validate_jordan_segmentation.py always evaluates RAW weights, same anti-contamination pattern as Stage 1
+  log_interval: 25
+  val_interval: 1000
+  val_max_patients: 5                   # cap on the periodic in-training validation pass (full-volume, so this stays cheap)
+  checkpoint_interval: 1000
+  keep_last_n_checkpoints: 3
+  log_file: "/kaggle/working/logs/stage3_segmentation_log.csv"
+
+checkpoint:
+  working_dir: "/kaggle/working/checkpoints/stage3_segmentation"   # separate from Stage 1/2's checkpoint dirs -- never collides
+  extra_resume_dirs: []

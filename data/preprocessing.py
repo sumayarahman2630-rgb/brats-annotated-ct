@@ -3,7 +3,7 @@
 HU clip/normalize, MRI percentile-normalize, brain-mask apply/crop/pad.
 Having exactly one implementation of each of these is what guarantees
 Stage 2's BraTS input is normalized identically to what Stage 1 trained on
-(see DEVELOPMENT_LOG.md's "domain gap" note for why that match matters here more
+(see PROJECT_NOTES.md's "domain gap" note for why that match matters here more
 than in a typical pipeline). Everything here follows SynthRAD2023's
 official preprocessing conventions (resample, clip, mask-based background
 fill, bbox crop).
@@ -199,4 +199,48 @@ def random_patch_crop(
     slices = tuple(
         slice(starts[a], starts[a] + patch_size[a]) for a in range(3)
     )
+    return [arr[slices] for arr in arrays]
+
+
+def foreground_biased_patch_crop(
+    arrays: list[np.ndarray],
+    foreground_mask: np.ndarray,
+    patch_size: tuple[int, int, int],
+    rng: np.random.Generator,
+    foreground_prob: float = 0.5,
+) -> list[np.ndarray]:
+    """Added for Stage 3 (tumor segmentation): a tumor occupies a tiny
+    fraction of a whole brain volume, so a purely uniform-random crop (see
+    random_patch_crop above) would mostly land on empty background --
+    weak or degenerate Dice gradient signal, since Dice over an all-empty
+    patch's prediction/target pair carries little information. With
+    probability `foreground_prob`, this instead centers the patch on a
+    randomly chosen foreground (nonzero) voxel of `foreground_mask`
+    (clamped so the patch stays in-bounds); otherwise -- or if the mask has
+    no foreground voxels at all -- falls back to the exact same uniform
+    random crop as random_patch_crop. Deliberately a new function rather
+    than a random_patch_crop parameter: Stage 1/2's regression training
+    reuses random_patch_crop unmodified and has no foreground-sparsity
+    problem (the CT target is present everywhere), so this only applies
+    where it's actually needed.
+    """
+    shape = arrays[0].shape
+    use_foreground = foreground_prob > 0 and np.any(foreground_mask) and rng.random() < foreground_prob
+
+    starts = []
+    if use_foreground:
+        fg_idx = np.nonzero(foreground_mask)
+        pick = int(rng.integers(0, len(fg_idx[0])))
+        for axis in range(3):
+            center = int(fg_idx[axis][pick])
+            span = shape[axis] - patch_size[axis]
+            lo = max(0, center - patch_size[axis] // 2)
+            lo = min(lo, span) if span > 0 else 0
+            starts.append(lo)
+    else:
+        for axis in range(3):
+            span = shape[axis] - patch_size[axis]
+            starts.append(int(rng.integers(0, span + 1)) if span > 0 else 0)
+
+    slices = tuple(slice(starts[a], starts[a] + patch_size[a]) for a in range(3))
     return [arr[slices] for arr in arrays]
