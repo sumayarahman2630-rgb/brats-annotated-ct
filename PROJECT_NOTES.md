@@ -842,3 +842,170 @@ every session):**
    command — it auto-detects and resumes from the highest-step checkpoint
    across all listed directories.
 5. Repeat each session.
+
+## Stage 3 — CT tumor segmentation (added 2026-07-18)
+
+A third goal, on top of the original two: train a binary tumor
+segmentation model on the Stage 2 output (synthetic CT + tumor mask), then
+externally validate it against a small real-CT dataset from Jordan
+University Hospital that is never used in training. Three new Kaggle
+inputs were attached for this: the Stage 2 output re-uploaded as its own
+dataset (365 BraTS patients), and two Jordan datasets (20 patients each —
+CT and mask, as separate flat directories of DICOM slices).
+
+**Confirmed dataset paths (do not re-derive):**
+```
+# Dataset 1 -- Stage 2 output, re-uploaded (note the unusually deep,
+# Kaggle-exported path -- this is not a mistake to "fix")
+/kaggle/input/datasets/sumayarahmanmeherin/annoted-sct/kaggle/input/notebooks/sumayarahmanmeherin/mri-to-ct/synthetic_ct_dataset_regression/<patient_id>/synthetic_ct.nii
+/kaggle/input/datasets/sumayarahmanmeherin/annoted-sct/kaggle/input/notebooks/sumayarahmanmeherin/mri-to-ct/synthetic_ct_dataset_regression/<patient_id>/tumor_mask.nii
+
+# Dataset 2 -- Jordan real CT (20 patients, RGB DICOM, 0-255, windowed --
+# NOT raw HU)
+/kaggle/input/datasets/sumayarahmanmeherin/annoted-20-ct/<patient_id>_CT_s<slice_num>.dcm
+
+# Dataset 3 -- Jordan real tumor mask (matched to Dataset 2 by patient_id +
+# slice_num parsed from the filename)
+/kaggle/input/datasets/sumayarahmanmeherin/mask-data-20/<patient_id>_CT_m<slice_num>.dcm
+```
+Note the file extension for Dataset 1 is bare `.nii`, not the `.nii.gz`
+`run_stage2_brats_regression.py` itself writes -- the Kaggle re-upload
+process appears to have decompressed it. `data/loaders_synthetic_ct.py`
+matches either extension, so this doesn't need to be "fixed" anywhere.
+
+**Critical preprocessing decision: mask binarization.** `tumor_mask.nii`
+is the ORIGINAL BraTS annotation, copied through Stage 2 unmodified (see
+`run_stage2_brats_regression.py`'s own "Known limitations"). BraTS labels
+are multi-class -- 0 background, 1 NCR/NET, 2 ED, 4 ET (3 is never used).
+Stage 3 is scoped to binary tumor segmentation, not sub-region
+classification: sub-region work is out of scope for now, and the Jordan
+masks are presumed binary too, so a multi-class *target* wouldn't even
+have a like-for-like external comparison available. `data/
+loaders_synthetic_ct.py`'s `_load_and_preprocess` collapses every nonzero
+label to 1 before anything else touches the mask -- verified directly in
+`tests/test_stage3_segmentation.py` against a fixture using the real
+0/1/2/4 label set.
+
+**Known, load-bearing limitations of the Jordan comparison** (all
+documented in code too -- see `data/loaders_jordan_ct.py`'s and
+`inference/validate_jordan_segmentation.py`'s module docstrings):
+1. **Format mismatch.** Jordan CT/mask are RGB, 0-255, windowed
+   ("secondary capture" DICOM -- an already-rendered image, not raw HU
+   pixel data). There is no HU value to recover from an 8-bit windowed
+   screenshot, so `data/loaders_jordan_ct.py` can only min-max normalize
+   each slice to itself -- structurally different from the real-HU-based
+   normalization the model trained on. Any Dice/IoU computed against this
+   data measures whether the model's predicted SHAPE agrees with the real
+   tumor outline, not whether its intensity reasoning transfers, because
+   it cannot be asked to given the input format.
+2. **Incomplete volumes.** Each Jordan patient has only 1-6 tumor-
+   containing slices, not a full 3D volume -- no real 3D neighborhood
+   exists for a 3D model to use. `inference/validate_jordan_segmentation.py`
+   works around this by replicating the single 2D slice
+   `--replication_depth` times along Z to build a "pseudo-volume" the
+   model can run on, then reads back the center slice of the output. This
+   gives the model *something* 3D-shaped, but every neighboring slice it
+   sees is a copy, not real anatomy. Treat Jordan Dice/IoU as "can the
+   model do something reasonable given a single real slice," not "3D
+   segmentation quality on real data."
+3. **Filename matching is not independently verified.**
+   `discover_jordan_slices` matches CT and mask files purely by
+   `(patient_id, slice_num)` parsed from filenames in two separate
+   directories, and logs (rather than silently drops or guesses at) any
+   CT-only or mask-only file. But there is no cross-check that a matched
+   pair actually depicts the same anatomical slice beyond the naming
+   convention holding -- a wrong pairing that still matches the filename
+   pattern would silently corrupt the reported metrics with no error.
+4. **Label granularity mismatch** -- addressed by binarization above, not
+   a remaining risk, but listed here since it was one of the four known
+   gaps going in.
+
+**Honest assessment: how much do these limitations reduce validation
+reliability?** Meaningfully, and in ways that compound. The format
+mismatch (#1) means Jordan metrics are, at best, a shape-agreement check,
+not a real generalization test of the model's actual CT-intensity
+reasoning -- a model that's learned to key off HU-range cues the training
+data has and Jordan doesn't could look artificially worse than it "really"
+is, and one that's learned something more shape-based could look
+artificially better. The pseudo-volume workaround (#2) means the model
+never sees genuine 3D context for Jordan slices, so any real 3D-aware
+behavior it learned during training (e.g. using neighboring-slice
+continuity) is neither being tested nor available to help it here --
+Jordan numbers likely underestimate what the model can do on genuine 3D
+input, for a reason unrelated to real-world generalization. The matching
+risk (#3) means a small, silent, currently-undetected fraction of
+"matched" pairs could be wrong, which would show up as unexplained outlier
+Dice scores for specific slices -- worth a manual visual spot-check of a
+few low-scoring Jordan cases before drawing conclusions from them, not
+just trusting the aggregate mean. **Net effect: treat the Jordan Dice/IoU
+numbers as a rough, directional signal ("does this look like it's doing
+something reasonable on real data at all") rather than a rigorous,
+publishable external-validation result** -- the synthetic-CT held-out
+validation split (real patient-level split, no format mismatch, no 3D
+workaround) is the more trustworthy number for actual model quality.
+
+**Model/training:** `models/unet3d_segmentation.py` is the same plain
+encoder-decoder topology as Stage 1's regression U-Net (own file, no
+shared code, same pipeline-isolation reasoning), with a sigmoid output
+head instead of tanh. Loss is Dice + BCE (`training/
+train_stage3_segmentation.py`'s `combined_loss`) -- standard for
+segmentation under severe foreground/background imbalance. Training
+patches are foreground-biased (`data/preprocessing.py`'s new
+`foreground_biased_patch_crop`, additive, doesn't touch
+`random_patch_crop`): with `data.foreground_prob` probability (default
+0.5), a patch is centered on a random tumor voxel instead of a uniform
+random location, since a tumor is a tiny fraction of a whole brain volume
+and pure random cropping would mostly yield empty-mask patches and weak
+Dice gradient signal. Same resumability design as every other stage
+(checkpoint-saved-before-validation ordering applied from the start here,
+rather than waiting to hit the real-Kaggle bug that taught this lesson in
+Stage 1).
+
+**Repo additions:** `models/unet3d_segmentation.py`,
+`configs/stage3_ct_segmentation.yaml`,
+`training/train_stage3_segmentation.py`, `data/loaders_synthetic_ct.py`
+(Stage 2 output loader, not explicitly requested but needed -- neither
+existing loader reads that file layout), `data/loaders_jordan_ct.py`,
+`inference/validate_jordan_segmentation.py`. Existing Stage 1/2 files
+(`models/unet3d_regression.py`, `training/train_stage1_regression.py`,
+`inference/*`, `data/loaders_synthrad.py`, `data/loaders_brats.py`)
+untouched.
+
+**Verification done without a GPU** (see `tests/test_stage3_segmentation.py`
+and `tests/test_loaders_jordan_ct.py`): synthetic-CT discovery accepts
+both `.nii`/`.nii.gz`; the real 0/1/2/4 BraTS label set collapses to
+binary {0,1}; patient-level split has no leakage; the foreground-biased
+crop reliably lands on a small tumor when asked to; the segmentation
+model's shape and sigmoid-range are correct; the real train → checkpoint →
+resume cycle; Jordan CT/mask slice matching by (patient_id, slice_num),
+including that an unmatched CT-only or mask-only file is excluded and
+logged rather than mismatched; RGB→grayscale conversion against real
+(pydicom-built) DICOM fixtures; per-slice normalize/binarize correctness.
+**Not verified**, because this machine has no GPU and no access to the
+real Kaggle datasets: actual training convergence on real synthetic CT,
+real Dice/IoU numbers on real Jordan data, and real memory/time behavior
+at production model/patch size (the sliding-window OOM precaution from
+Stage 1 is applied here from the start, but its actual necessity for this
+specific model/task is unconfirmed on real hardware).
+
+### Future work note: radiomics validation scope (not started, do not begin yet)
+
+Radiomics feature extraction and prediction is explicitly **out of scope
+for Stage 3** -- noted here only so a future session doesn't have to
+re-derive this reasoning:
+
+- BraTS masks are tumor-annotated, but BraTS has no real CT at all --
+  only real MRI. So BraTS cannot support a "real CT radiomics vs.
+  synthetic CT radiomics" comparison; there is no real-CT half to compare
+  against.
+- SynthRAD has both real CT and real MRI (so a CT↔MRI radiomics-
+  reproducibility comparison genuinely is possible there), but SynthRAD's
+  mask is a whole-brain/anatomy mask, not a tumor delineation -- SynthRAD
+  patients were undergoing radiotherapy planning, but the released dataset
+  has no tumor-specific annotation.
+- **Conclusion: any future radiomics validation built on this project's
+  data would necessarily be a "whole-brain-region radiomics
+  reproducibility" study (using SynthRAD's real CT+MRI pair), not a
+  "tumor-specific radiomics" study** -- the two are genuinely different
+  claims, and this project's data supports only the former. Don't
+  conflate them in whatever radiomics work eventually gets built.

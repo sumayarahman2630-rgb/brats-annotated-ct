@@ -5,7 +5,7 @@ operating in Haar-wavelet space (3D) plus a pixel-space 2D variant, both
 following the cwdm-style wavelet-domain-diffusion pattern. It's preserved
 here, not deleted, as a record of what was tried and why it didn't become
 the final pipeline -- see the main [README.md](../README.md) and
-[DEVELOPMENT_LOG.md](../DEVELOPMENT_LOG.md) for the full comparison and reasoning.
+[PROJECT_NOTES.md](../PROJECT_NOTES.md) for the full comparison and reasoning.
 
 **In one sentence: after real Kaggle training, the diffusion checkpoint
 reached only ~9 dB foreground PSNR, while a much simpler direct-regression

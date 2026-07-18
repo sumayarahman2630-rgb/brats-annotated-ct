@@ -6,7 +6,7 @@ training/train_stage1_regression.py (same config, same seed) so this is
 guaranteed to score only patients the model never trained on.
 
 Deliberately uses RAW checkpoint weights only, same anti-EMA-contamination
-pattern as compare_synthrad_val.py (see DEVELOPMENT_LOG.md round 6): no EMA object
+pattern as compare_synthrad_val.py (see PROJECT_NOTES.md round 6): no EMA object
 is constructed here at all.
 
 Inference runs on each val patient's FULL cropped volume via sliding-window
@@ -83,7 +83,7 @@ def main():
         if ckpt_path is None:
             raise RuntimeError(f"No regression checkpoint found in {search_dirs}.")
     # ema=None, same as compare_synthrad_val.py: raw weights only, structurally can't
-    # reintroduce the EMA-contamination bug from DEVELOPMENT_LOG.md's "Known bugs fixed" (round 6).
+    # reintroduce the EMA-contamination bug from PROJECT_NOTES.md's "Known bugs fixed" (round 6).
     step, _extra = load_checkpoint(ckpt_path, model, ema=None, optimizer=None, scheduler=None, map_location=device.type)
     log.info("Loaded checkpoint %s (step %d) -- RAW weights, no EMA involved", ckpt_path, step)
     model.eval()

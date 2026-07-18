@@ -1,6 +1,6 @@
 # Stage 1 (MRI -> CT wavelet diffusion, trained on SynthRAD2023) config.
 # Every hyperparameter the code reads lives here -- nothing is hardcoded in
-# data/, models/, or training/. See DEVELOPMENT_LOG.md for the reasoning behind these
+# data/, models/, or training/. See PROJECT_NOTES.md for the reasoning behind these
 # choices (architecture decision record).
 
 seed: 42
@@ -8,13 +8,13 @@ seed: 42
 data:
   # Confirmed exact Kaggle layout (2026-07-15): per-patient folders directly
   # under Task1/brain, each containing ct.nii, mask.nii, mr.nii. See
-  # DEVELOPMENT_LOG.md's "Kaggle dataset paths" section -- this is final, don't
+  # PROJECT_NOTES.md's "Kaggle dataset paths" section -- this is final, don't
   # re-derive it from the dataset root.
   synthrad_root: "/kaggle/input/datasets/fd7akxj65n5yjxwds/synthrad-2023/Task1/brain"
   region: null                       # path above is already scoped to Task1/brain; no filtering needed
   target_spacing: [1.0, 1.0, 1.0]     # mm, matches SynthRAD2023's official brain preprocessing
   ct_clip_range: [-1000.0, 3000.0]    # HU clip range before normalization to [-1, 1]
-  match_brats_domain: true            # zero non-brain voxels in both MR and CT -- see DEVELOPMENT_LOG.md domain-gap note
+  match_brats_domain: true            # zero non-brain voxels in both MR and CT -- see PROJECT_NOTES.md domain-gap note
   crop_margin: 10                     # voxel margin around the brain-mask bounding box, matches SynthRAD2023 convention
   spatial_multiple: 16                # 2 (wavelet) * 2^3 (3 U-Net downsamples for channel_mult below) -- must match model.channel_mult length
   patch_size: null                    # e.g. [128, 128, 128] to train on random crops instead of full volumes; must be a multiple of spatial_multiple
@@ -43,7 +43,7 @@ model:
   # brain volume, still OOMs at level 4 (N=24,960 -> ~9.3 GiB dense attention matrix,
   # on top of ~7.85 GiB already used by higher-resolution blocks, on a 14.56 GiB T4).
   # [8]-only (bottleneck-only, current default) is the certain fix -- N is only a few
-  # thousand there, trivial memory. See DEVELOPMENT_LOG.md's "Known bugs fixed" for the full
+  # thousand there, trivial memory. See PROJECT_NOTES.md's "Known bugs fixed" for the full
   # story, including an unverified-on-GPU attempt at forcing the flash/memory-efficient
   # SDPA backend (models/unet3d.py) that might make [4, 8] safe again -- worth
   # re-testing once training is otherwise stable, since bottleneck-only attention is a
@@ -149,7 +149,7 @@ training:
   total_steps: 9000
   # ema_decay: 0.9999 -> 0.995 (round 6): lowers the EMA time constant from
   # ~10,000 steps to ~200 steps. The existing checkpoint's EMA state is still
-  # contaminated (see DEVELOPMENT_LOG.md's "Known bugs fixed" -- 57.7% random-init
+  # contaminated (see PROJECT_NOTES.md's "Known bugs fixed" -- 57.7% random-init
   # after 5500 steps at the old decay), but continuing at this lower decay
   # for even a few hundred more steps lets EMA actually converge and become
   # usable again, in case there's time to compare EMA vs. raw weights at the
@@ -169,7 +169,7 @@ checkpoint:
   working_dir: "/kaggle/working/checkpoints/stage1_synthrad"
   # Populate this on a fresh Kaggle session with the mounted path of a
   # previous session's saved Output (Add Input -> Notebook Output Files).
-  # See DEVELOPMENT_LOG.md's "What you need to do on Kaggle's side" section.
+  # See PROJECT_NOTES.md's "What you need to do on Kaggle's side" section.
   extra_resume_dirs: []
 
 kaggle:

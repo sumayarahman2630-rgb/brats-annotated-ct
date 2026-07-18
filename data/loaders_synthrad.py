@@ -175,7 +175,7 @@ class SynthRADBrainDataset(Dataset):
         # to hallucinate skull/face structure from an MR channel that's all zeros outside
         # the brain at Stage 2 inference time. Zeroing both CT and MR to the mask here
         # makes Stage 1's training distribution match what Stage 2 actually feeds it --
-        # see DEVELOPMENT_LOG.md's "domain gap" note, this is a real failure mode, not a
+        # see PROJECT_NOTES.md's "domain gap" note, this is a real failure mode, not a
         # hypothetical one.
         if self.match_brats_domain and np.any(mask_arr):
             ct_arr = apply_mask(ct_arr, mask_arr, background_value=CT_BACKGROUND_HU)

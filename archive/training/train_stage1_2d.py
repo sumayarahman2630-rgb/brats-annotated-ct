@@ -3,7 +3,7 @@ slice-based MRI -> CT diffusion model. Run as:
 
     python -m training.train_stage1_2d --config configs/stage1_synthrad_2d.yaml
 
-Same resumability design as the 3D script (see DEVELOPMENT_LOG.md): auto-detects and
+Same resumability design as the 3D script (see PROJECT_NOTES.md): auto-detects and
 resumes from the highest-step checkpoint in checkpoint.working_dir plus any
 checkpoint.extra_resume_dirs, works identically whether that's the same
 Kaggle session after an interruption or a fresh session with a previous

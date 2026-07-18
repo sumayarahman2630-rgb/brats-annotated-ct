@@ -5,7 +5,7 @@ conditioning at all. Deliberately much simpler than the archived wavelet
 diffusion model (no attention, no FiLM timestep embedding, no wavelet
 transform), and empirically the better result: 28.21 dB foreground PSNR on
 held-out validation patients at step 20000, vastly ahead of the diffusion
-checkpoint's ~9 dB (see DEVELOPMENT_LOG.md and the main README for the comparison).
+checkpoint's ~9 dB (see PROJECT_NOTES.md and the main README for the comparison).
 No shared code with the archived models -- same pipeline-isolation
 reasoning throughout this project: a bug here can't affect archived code,
 and vice versa.

@@ -1,6 +1,6 @@
 # Stage 2 (synthetic CT generation from BraTS T1 volumes), regression-model
 # variant of configs/stage2_inference_brats.yaml. Same BraTS path/layout
-# assumptions -- see that file's header comment and DEVELOPMENT_LOG.md's "Kaggle
+# assumptions -- see that file's header comment and PROJECT_NOTES.md's "Kaggle
 # dataset paths" section, unchanged here.
 
 stage1_config: "configs/stage1_regression.yaml"   # regression checkpoint + architecture + preprocessing params

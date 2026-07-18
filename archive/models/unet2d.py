@@ -4,7 +4,7 @@ as the 3D U-Net (models/unet3d.py) -- FiLM-style timestep conditioning,
 self-attention at coarse resolutions, activation checkpointing, safe
 GroupNorm group counts -- reimplemented in 2D rather than importing the 3D
 version with a dims= flag, so this file can be read and reasoned about on
-its own, independent of the 3D pipeline (see DEVELOPMENT_LOG.md: the two pipelines
+its own, independent of the 3D pipeline (see PROJECT_NOTES.md: the two pipelines
 are deliberately kept separate, one mustn't be able to break the other).
 
 No wavelet transform here: a single 2D slice (e.g. 256x256) is already
@@ -14,7 +14,7 @@ a 2D one. This matches standard practice for 2D paired medical image
 translation diffusion (Palette/SR3-style: concatenate the condition to the
 noisy target channel-wise, plain pixel-space DDPM U-Net, no CFG needed for
 deterministic paired translation -- same reasoning as the 3D model's
-architecture decision record in DEVELOPMENT_LOG.md).
+architecture decision record in PROJECT_NOTES.md).
 """
 from __future__ import annotations
 

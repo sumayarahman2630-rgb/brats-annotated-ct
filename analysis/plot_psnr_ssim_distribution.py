@@ -7,7 +7,7 @@ Input: --metrics_csv, the CSV written by generate_val_metrics_table.py
 (columns: patient_id, l1_norm, psnr_full, ssim_full, psnr_fg). Uses
 foreground-only PSNR (psnr_fg) as "the" PSNR metric throughout this
 project -- whole-volume PSNR is inflated by trivially-easy background
-agreement (see DEVELOPMENT_LOG.md's round-8 audit) -- and whole-volume SSIM
+agreement (see PROJECT_NOTES.md's round-8 audit) -- and whole-volume SSIM
 (ssim_full), the only SSIM this project computes.
 
 Output: a single PNG with two side-by-side box plots, saved to --output.

@@ -2,7 +2,7 @@
 crops to the brain bounding box (matching Stage 1's training preprocessing),
 and run_stage2_brats.py must correctly paste the model's cropped-resolution
 output back into the full BraTS grid. Formalizes the ad-hoc verification
-done when that bug was found and fixed (DEVELOPMENT_LOG.md, "BraTS Stage 2 input
+done when that bug was found and fixed (PROJECT_NOTES.md, "BraTS Stage 2 input
 was missing Stage 1's brain-crop step").
 
 Deliberately uses a brain region that's a tiny fraction of a much larger
