@@ -121,7 +121,7 @@ python -m pytest tests/
 
 ```
 models/unet3d_regression.py           Stage 1 model: plain 3D regression U-Net
-models/unet3d_segmentation.py         Stage 3 model: same U-Net topology, sigmoid output for binary segmentation
+models/unet3d_segmentation.py         Stage 3 model: same U-Net topology, raw logit output (sigmoid applied by the caller, for autocast safety)
 configs/stage1_regression.yaml        Stage 1 hyperparameters
 configs/stage2_inference_brats_regression.yaml   Stage 2 settings
 configs/stage3_ct_segmentation.yaml   Stage 3 hyperparameters + dataset paths (synthetic CT + Jordan)

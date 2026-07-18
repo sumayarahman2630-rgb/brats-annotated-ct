@@ -946,8 +946,9 @@ workaround) is the more trustworthy number for actual model quality.
 
 **Model/training:** `models/unet3d_segmentation.py` is the same plain
 encoder-decoder topology as Stage 1's regression U-Net (own file, no
-shared code, same pipeline-isolation reasoning), with a sigmoid output
-head instead of tanh. Loss is Dice + BCE (`training/
+shared code, same pipeline-isolation reasoning), predicting a raw logit
+map (see the bug note below for why it's logits, not a sigmoid-activated
+probability, straight out of `forward()`). Loss is Dice + BCE (`training/
 train_stage3_segmentation.py`'s `combined_loss`) -- standard for
 segmentation under severe foreground/background imbalance. Training
 patches are foreground-biased (`data/preprocessing.py`'s new
@@ -960,6 +961,33 @@ Dice gradient signal. Same resumability design as every other stage
 (checkpoint-saved-before-validation ordering applied from the start here,
 rather than waiting to hit the real-Kaggle bug that taught this lesson in
 Stage 1).
+
+**Bug found on the real Kaggle smoke test (2026-07-19): logits, not
+sigmoid, out of the model.** `UNet3DSegmentation.forward()` originally
+applied `sigmoid` internally, and `combined_loss` called
+`F.binary_cross_entropy` on that already-sigmoided output. Both
+`torch.nn.functional.binary_cross_entropy` and `torch.nn.BCELoss` are
+explicitly unsafe under CUDA autocast -- they require an input already in
+[0, 1], and fp16 casting can silently corrupt that -- so the very first
+smoke test crashed immediately with a `RuntimeError` at the first training
+step. Fixed by moving the sigmoid out of the model: `forward()` now
+returns raw logits, `combined_loss` uses
+`F.binary_cross_entropy_with_logits` (fuses sigmoid + BCE in a numerically
+stable, autocast-safe way) for the BCE half and applies `torch.sigmoid`
+explicitly, once, for the Dice half (Dice needs an actual probability to
+compute overlap against a 0/1 target -- logits don't make sense there).
+`predict_full_volume` applies sigmoid per-patch before blending overlapping
+windows, not after averaging the whole volume -- sigmoid is nonlinear, so
+those two orders aren't equivalent, and only the per-patch order is
+correct. Verified (CPU, no GPU needed for this part): a new test asserts
+`combined_loss`'s value exactly matches manually computing
+`sigmoid(logits)` and calling the plain (non-autocast-safe)
+`binary_cross_entropy` + `dice_loss` on that -- i.e. the fix changes *how*
+the computation is expressed for autocast-safety, not *what* it computes --
+plus gradients are finite through a real forward/backward pass. The actual
+autocast crash itself can't be reproduced on this CPU-only machine (autocast
+only activates on `device.type == "cuda"`), so the real-GPU confirmation is
+still pending the next Kaggle run.
 
 **Repo additions:** `models/unet3d_segmentation.py`,
 `configs/stage3_ct_segmentation.yaml`,

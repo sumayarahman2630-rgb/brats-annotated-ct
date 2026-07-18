@@ -73,12 +73,24 @@ class Up3D(nn.Module):
 
 
 class UNet3DSegmentation(nn.Module):
-    """Plain forward segmenter: ct -> tumor_probability, input a [-1, 1]-
+    """Plain forward segmenter: ct -> tumor_logits, input a [-1, 1]-
     normalized single-channel CT volume, output a single-channel
-    per-voxel probability map in [0, 1] (sigmoid, not tanh -- this is a
-    probability, not a signed intensity). `forward(ct)` returns the
-    prediction directly, no sampling loop, same deterministic-single-pass
-    design as Stage 1's regression model.
+    per-voxel RAW LOGIT map (not a probability -- no sigmoid applied
+    here). `forward(ct)` returns the logits directly, no sampling loop,
+    same deterministic-single-pass design as Stage 1's regression model.
+
+    Deliberately returns logits, not sigmoid(logits): torch.nn.BCELoss /
+    F.binary_cross_entropy are explicitly unsafe under CUDA autocast (they
+    require an already-in-[0,1] input, which fp16 casting can silently
+    corrupt) -- PyTorch's own fix is to keep the model's output as logits
+    and use F.binary_cross_entropy_with_logits instead, which fuses the
+    sigmoid and the loss in a numerically stable, autocast-safe way. See
+    training/train_stage3_segmentation.py's combined_loss for where the
+    sigmoid actually happens for the Dice half of the loss, and
+    predict_full_volume below for where it happens at inference time.
+    Hit as a real crash on a real Kaggle GPU (2026-07-19) -- this file
+    originally applied sigmoid() inside forward() itself, which is the
+    wrong place for exactly this reason.
 
     Fully convolutional: trained on fixed-size patches (data.patch_size in
     the config) but can run on full, larger volumes via predict_full_volume
@@ -101,9 +113,10 @@ class UNet3DSegmentation(nn.Module):
         len(channel_mult)-1 down/up-sample steps, skip connections between
         matching encoder/decoder levels (standard U-Net topology). The
         final conv is zero-initialized so the model starts by predicting a
-        flat sigmoid(0)=0.5 output everywhere -- an uninformative but
-        stable starting point (Dice+BCE loss pulls it toward the true,
-        heavily-background-biased distribution from there)."""
+        flat logit=0 (i.e. sigmoid(0)=0.5 once a probability is actually
+        needed) everywhere -- an uninformative but stable starting point
+        (Dice+BCE loss pulls it toward the true, heavily-background-biased
+        distribution from there)."""
         super().__init__()
         self.num_levels = len(channel_mult)
 
@@ -133,11 +146,12 @@ class UNet3DSegmentation(nn.Module):
         nn.init.zeros_(self.out_conv.bias)
 
     def forward(self, ct: torch.Tensor) -> torch.Tensor:
-        """Single deterministic forward pass: ct -> tumor probability map,
-        same spatial shape in and out (as long as input dims are divisible
-        by 2**(num_levels-1)). Encoder pushes onto `skips` on the way down;
-        decoder pops and concatenates them on the way up, standard U-Net
-        skip-connection wiring."""
+        """Single deterministic forward pass: ct -> tumor logit map (NOT a
+        probability -- see class docstring for why), same spatial shape in
+        and out (as long as input dims are divisible by 2**(num_levels-1)).
+        Encoder pushes onto `skips` on the way down; decoder pops and
+        concatenates them on the way up, standard U-Net skip-connection
+        wiring."""
         h = ct
         skips = []
         for level in range(self.num_levels):
@@ -152,7 +166,7 @@ class UNet3DSegmentation(nn.Module):
             h = torch.cat([h, skip], dim=1)
             h = self.up_blocks[i](h)
 
-        return torch.sigmoid(self.out_conv(h))
+        return self.out_conv(h)
 
     @torch.no_grad()
     def predict_full_volume(
@@ -166,10 +180,14 @@ class UNet3DSegmentation(nn.Module):
         models/unet3d_regression.py's method of the same name (see that
         docstring for the full reasoning and the real-Kaggle OOM that
         motivated it). Splits `ct` (1, 1, D, H, W) into overlapping
-        patch_size windows, runs forward() on each independently, and
+        patch_size windows, runs forward() on each independently, applies
+        sigmoid to convert that patch's logits to a probability, and
         blends overlapping regions by uniform averaging -- averaging
-        probabilities (not logits) across overlaps is standard practice
-        for tiled segmentation inference and keeps the output in [0, 1].
+        PROBABILITIES (not logits) across overlaps is the mathematically
+        correct choice (sigmoid is nonlinear, so averaging logits and
+        sigmoiding once at the end is not equivalent) and is standard
+        practice for tiled segmentation inference. Returns probabilities
+        in [0, 1], unlike forward() itself which returns raw logits.
         """
         self.eval()
         _, _, D, H, W = ct.shape
@@ -203,7 +221,7 @@ class UNet3DSegmentation(nn.Module):
                     pad = (0, pw - (w1 - w0), 0, ph - (h1 - h0), 0, pd - (d1 - d0))
                     if any(p != 0 for p in pad):
                         patch = torch.nn.functional.pad(patch, pad, mode="constant", value=-1.0)
-                    pred_patch = self.forward(patch)
+                    pred_patch = torch.sigmoid(self.forward(patch))
                     pred_patch = pred_patch[:, :, : (d1 - d0), : (h1 - h0), : (w1 - w0)]
                     accum[:, :, d0:d1, h0:h1, w0:w1] += pred_patch
                     weight[:, :, d0:d1, h0:h1, w0:w1] += 1.0

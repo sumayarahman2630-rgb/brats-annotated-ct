@@ -11,11 +11,13 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 import torch
+import torch.nn.functional as F
 import yaml
 
 from data.loaders_synthetic_ct import build_synthetic_ct_dataloaders, discover_synthetic_ct_patients
 from data.preprocessing import foreground_biased_patch_crop
 from models.unet3d_segmentation import build_segmentation_model
+from training.train_stage3_segmentation import combined_loss, dice_loss
 
 
 def _write_fake_synthetic_ct(root, patient_ids, shape=(24, 24, 24)):
@@ -112,13 +114,61 @@ def test_foreground_biased_crop_finds_small_tumor_reliably():
         assert ct_c.shape == (8, 8, 8)
 
 
-def test_segmentation_model_shape_and_sigmoid_range():
+def test_segmentation_model_returns_logits_not_probabilities():
+    """forward() must return raw logits, not sigmoid-activated probabilities
+    -- F.binary_cross_entropy/BCELoss are unsafe under CUDA autocast (crashed
+    on a real Kaggle GPU, 2026-07-19), and the fix requires the model to
+    hand back logits so combined_loss can use binary_cross_entropy_with_logits.
+    Zero-initialized out_conv means the logits should be exactly 0 (not 0.5)
+    at initialization -- sigmoid(0) == 0.5 is applied by the caller, not here."""
     config = {"model": {"base_channels": 4, "channel_mult": [1, 2], "num_groups": 2}}
     model = build_segmentation_model(config)
     x = torch.randn(2, 1, 16, 16, 16)
-    y = model(x)
-    assert y.shape == x.shape
-    assert (y >= 0).all() and (y <= 1).all(), "sigmoid output must be in [0, 1]"
+    logits = model(x)
+    assert logits.shape == x.shape
+    assert torch.allclose(logits, torch.zeros_like(logits), atol=1e-6), "zero-init out_conv should give exactly logit=0"
+
+    probs = torch.sigmoid(logits)
+    assert (probs >= 0).all() and (probs <= 1).all()
+    assert torch.allclose(probs, torch.full_like(probs, 0.5), atol=1e-6)
+
+
+def test_combined_loss_matches_manual_sigmoid_bce_and_backpropagates():
+    """combined_loss takes logits and must equal dice_loss(sigmoid(logits))
+    + bce_weight * BCE(sigmoid(logits)) computed manually -- i.e. switching
+    to binary_cross_entropy_with_logits(logits, ...) must be numerically
+    equivalent to the original binary_cross_entropy(sigmoid(logits), ...)
+    it replaced, not just autocast-safe. Also checks gradients flow
+    through a real model's logits output, since that's what training
+    actually does."""
+    config = {"model": {"base_channels": 4, "channel_mult": [1, 2], "num_groups": 2}}
+    model = build_segmentation_model(config)
+    ct = torch.randn(2, 1, 16, 16, 16)
+    mask = (torch.rand(2, 1, 16, 16, 16) > 0.7).float()
+
+    logits = model(ct)
+    loss = combined_loss(logits, mask, bce_weight=1.0)
+
+    expected = dice_loss(torch.sigmoid(logits), mask) + F.binary_cross_entropy(torch.sigmoid(logits), mask)
+    assert torch.allclose(loss, expected, atol=1e-5), f"combined_loss {loss.item()} != manual sigmoid+BCE {expected.item()}"
+
+    loss.backward()
+    for p in model.parameters():
+        if p.requires_grad:
+            assert p.grad is not None and torch.isfinite(p.grad).all()
+
+
+def test_predict_full_volume_returns_probabilities_in_unit_range():
+    """predict_full_volume applies sigmoid per-patch before blending (see
+    its docstring: averaging probabilities, not logits, is the
+    mathematically correct choice) -- its output must stay a valid
+    probability regardless of forward() itself now returning unbounded logits."""
+    config = {"model": {"base_channels": 4, "channel_mult": [1, 2], "num_groups": 2}}
+    model = build_segmentation_model(config)
+    x = torch.randn(1, 1, 24, 24, 24)
+    out = model.predict_full_volume(x, patch_size=(16, 16, 16))
+    assert out.shape == x.shape
+    assert (out >= 0).all() and (out <= 1).all(), "predict_full_volume must return probabilities in [0, 1]"
 
 
 @pytest.mark.slow

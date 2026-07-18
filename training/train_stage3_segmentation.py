@@ -91,7 +91,9 @@ def dice_loss(pred: torch.Tensor, target: torch.Tensor, smooth: float = 1.0) -> 
     computed per-sample over the whole volume/patch then averaged over the
     batch. `smooth` avoids a 0/0 NaN when both pred and target are entirely
     empty (a real possibility for a random -- non-foreground-biased --
-    background patch)."""
+    background patch). `pred` must already be a probability in [0, 1]
+    (apply sigmoid to the model's raw logits before calling this -- see
+    combined_loss below, which does that itself)."""
     pred_flat = pred.reshape(pred.shape[0], -1)
     target_flat = target.reshape(target.shape[0], -1)
     intersection = (pred_flat * target_flat).sum(dim=1)
@@ -104,7 +106,9 @@ def dice_loss(pred: torch.Tensor, target: torch.Tensor, smooth: float = 1.0) -> 
 def dice_score(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5, smooth: float = 1.0) -> float:
     """Hard (thresholded) Dice coefficient, for human-readable logging --
     unlike dice_loss above, this is not differentiable and not what's
-    optimized; it's what gets reported."""
+    optimized; it's what gets reported. `pred` must already be a
+    probability in [0, 1] -- every call site below applies torch.sigmoid
+    to the model's raw logits first."""
     pred_bin = (pred > threshold).float()
     pred_flat = pred_bin.reshape(pred_bin.shape[0], -1)
     target_flat = target.reshape(target.shape[0], -1)
@@ -114,16 +118,26 @@ def dice_score(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5,
     return dice.mean().item()
 
 
-def combined_loss(pred: torch.Tensor, target: torch.Tensor, bce_weight: float) -> torch.Tensor:
+def combined_loss(logits: torch.Tensor, target: torch.Tensor, bce_weight: float) -> torch.Tensor:
     """Dice + BCE, the standard combination for segmentation with severe
     foreground/background imbalance: Dice directly rewards overlap with
     the (small) tumor region regardless of its size; BCE gives a smooth,
     well-behaved per-voxel gradient everywhere, including on patches with
     no foreground at all (where dice_loss's smoothing term alone gives a
-    weak signal). pred is already sigmoid-activated (see
-    models/unet3d_segmentation.py's forward()), so this uses
-    binary_cross_entropy, not the with_logits variant."""
-    return dice_loss(pred, target) + bce_weight * F.binary_cross_entropy(pred, target)
+    weak signal).
+
+    Takes RAW LOGITS (models/unet3d_segmentation.py's forward() no longer
+    applies sigmoid itself) -- torch.nn.functional.binary_cross_entropy /
+    BCELoss are explicitly unsafe under CUDA autocast (they require an
+    already-in-[0,1] input, which fp16 casting can silently corrupt), and
+    this crashed on a real Kaggle GPU (2026-07-19) before this fix.
+    F.binary_cross_entropy_with_logits fuses the sigmoid and the loss in a
+    numerically stable, autocast-safe way, so BCE uses that directly on
+    the logits. Dice still needs an actual probability to compute overlap
+    against a 0/1 target, so sigmoid is applied explicitly, once, just for
+    that half of the loss."""
+    probs = torch.sigmoid(logits)
+    return dice_loss(probs, target) + bce_weight * F.binary_cross_entropy_with_logits(logits, target)
 
 
 def init_log_file(path: str, resuming: bool) -> None:
@@ -187,9 +201,9 @@ def quick_validation(
         batch = _center_crop_batch_to_patch(batch, patch_size)
         ct, mask = batch["ct"].to(device), batch["mask"].to(device)
         with autocast_ctx:
-            pred = model(ct)
-        total_loss += combined_loss(pred.float(), mask.float(), bce_weight).item()
-        total_dice += dice_score(pred.float(), mask.float())
+            logits = model(ct)
+        total_loss += combined_loss(logits.float(), mask.float(), bce_weight).item()
+        total_dice += dice_score(torch.sigmoid(logits.float()), mask.float())
         n += 1
     model.train()
     return total_loss / max(1, n), total_dice / max(1, n)
@@ -282,8 +296,8 @@ def main():
 
         optimizer.zero_grad(set_to_none=True)
         with autocast_ctx():
-            pred = model(ct)
-            loss = combined_loss(pred, mask, bce_weight)
+            logits = model(ct)
+            loss = combined_loss(logits, mask, bce_weight)
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -298,7 +312,7 @@ def main():
         if global_step % log_interval == 0 or global_step == total_steps:
             elapsed = time.time() - t_start
             lr = scheduler.get_last_lr()[0]
-            train_dice = dice_score(pred.detach().float(), mask.float())
+            train_dice = dice_score(torch.sigmoid(logits.detach().float()), mask.float())
             log.info("step %d/%d | loss=%.5f | dice=%.4f | lr=%.6f | elapsed=%.1fs", global_step, total_steps, loss.item(), train_dice, lr, elapsed)
             append_log_row(log_file, global_step, "train", loss.item(), train_dice, lr, elapsed)
 
