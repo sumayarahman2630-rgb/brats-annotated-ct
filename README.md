@@ -27,7 +27,7 @@ the one that reached a genuinely good result:
 | **Regression U-Net (active)** | **28.21 dB** | L1 loss, direct prediction, 20000 training steps |
 | Wavelet diffusion (archived) | ~9 dB | DDPM, undertrained given the available compute budget |
 
-See [`CLAUDE.md`](CLAUDE.md) for the full development narrative — what was
+See [`DEVELOPMENT_LOG.md`](DEVELOPMENT_LOG.md) for the full development narrative — what was
 tried, what broke, and why the simpler model won — and
 [`archive/README.md`](archive/README.md) for why the diffusion approach
 was kept, not deleted.
@@ -56,7 +56,7 @@ SynthRAD2023 MRI + CT (paired, real)
 ## How to run
 
 Everything below assumes a Kaggle GPU session with the SynthRAD2023 and
-BraTS2020 datasets mounted (see `CLAUDE.md`'s "Kaggle dataset paths" for
+BraTS2020 datasets mounted (see `DEVELOPMENT_LOG.md`'s "Kaggle dataset paths" for
 the exact confirmed input paths).
 
 **1. Train Stage 1** (smoke-test first, same pattern for any new config):
@@ -108,7 +108,7 @@ analysis/                             reusable figure/table-generation scripts (
 scripts/check_orientation_consistency.py   diagnostic: NIfTI orientation consistency check
 tests/                                CPU-only test suite for the active pipeline
 archive/                              the original wavelet-diffusion pipeline (superseded, not deleted)
-CLAUDE.md                             full development narrative, decisions, and status log
+DEVELOPMENT_LOG.md                    full development narrative, decisions, and status log
 ```
 
 ### `analysis/`
@@ -138,5 +138,5 @@ Every script's input/output paths are CLI arguments (`--config`,
 - [BraTS2020](https://www.med.upenn.edu/cbica/brats2020/) training set
   (T1 MRI + tumor segmentation) — Stage 2 input data.
 
-See `CLAUDE.md`'s "Kaggle dataset paths" section for the exact confirmed
+See `DEVELOPMENT_LOG.md`'s "Kaggle dataset paths" section for the exact confirmed
 Kaggle input paths used during development.

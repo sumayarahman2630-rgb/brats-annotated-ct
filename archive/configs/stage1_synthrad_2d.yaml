@@ -1,7 +1,7 @@
 # Stage 1, 2D pipeline (MRI -> CT slice diffusion, trained on SynthRAD2023).
 # Fully separate from configs/stage1_synthrad.yaml (the 3D/wavelet pipeline)
 # -- different checkpoint directory, different everything -- so nothing here
-# can affect or be affected by the 3D pipeline. See CLAUDE.md for why this
+# can affect or be affected by the 3D pipeline. See DEVELOPMENT_LOG.md for why this
 # pipeline exists (round 8: 3D training was undertrained by the deadline;
 # 2D slices are far cheaper per step, so this is the faster path to a
 # genuinely converged, demonstrable model).
@@ -13,7 +13,7 @@ data:
   region: null                        # path above is already scoped to Task1/brain
   target_spacing: [1.0, 1.0, 1.0]
   ct_clip_range: [-1000.0, 3000.0]
-  match_brats_domain: true            # same domain-gap handling as the 3D pipeline, see CLAUDE.md
+  match_brats_domain: true            # same domain-gap handling as the 3D pipeline, see DEVELOPMENT_LOG.md
   crop_margin: 10
   slice_axis: 0                       # 0 = axial (first axis of sitk.GetArrayFromImage's (z,y,x) order)
   slice_size: [256, 256]               # every slice is padded/center-cropped to EXACTLY this size (not just
@@ -36,7 +36,7 @@ model:
                                         # no need to shrink this preemptively the way the 3D deadline config did
   channel_mult: [1, 2, 4, 4]           # 3 downsamples: 256 -> 128 -> 64 -> 32
   num_res_blocks: 2
-  # Lesson learned the hard way in the 3D pipeline (see CLAUDE.md "Known bugs
+  # Lesson learned the hard way in the 3D pipeline (see DEVELOPMENT_LOG.md "Known bugs
   # fixed", the 594 GiB attention OOM): attention_resolutions must match the
   # ACTUAL coarsest levels for channel_mult's length, not just "look small."
   # For 4 levels the per-level downsample factors are [1, 2, 4, 8]. At 256x256
@@ -74,7 +74,7 @@ training:
   total_steps: 200000                   # production target; checkpointed regularly, safe to interrupt anytime
                                           # (see checkpoint_interval) and resume later, same as the 3D pipeline
   ema_decay: 0.9999                      # standard value, appropriate for a real full-length run (NOT the 3D
-                                          # pipeline's deadline-night miscalibration -- see CLAUDE.md round 6 --
+                                          # pipeline's deadline-night miscalibration -- see DEVELOPMENT_LOG.md round 6 --
                                           # this is fine as long as total_steps actually reaches the tens of
                                           # thousands; if running a short smoke test only, don't trust EMA weights,
                                           # same caveat as the 3D pipeline)

@@ -1,3 +1,7 @@
+# local editor/AI-coding-tool configuration (not part of the project)
+.vscode/
+.idea/
+.cursor/
 .claude/
 __pycache__/
 *.pyc

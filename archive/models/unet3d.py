@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 # Prefer flash/memory-efficient SDPA backends (O(N) memory via tiling) over the
 # "math" fallback (materializes the full N x N score matrix -> O(N^2) memory,
 # the direct cause of the 594 GiB OOM this was added to diagnose -- see
-# CLAUDE.md's "Known bugs fixed"). API moved between torch versions; support both.
+# DEVELOPMENT_LOG.md's "Known bugs fixed"). API moved between torch versions; support both.
 try:
     from torch.nn.attention import SDPBackend, sdpa_kernel as _sdpa_kernel
 
@@ -101,7 +101,7 @@ class ResBlock3D(nn.Module):
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
         # Activation checkpointing trades compute for memory: instead of keeping every
         # intermediate (in particular the fp32 GroupNorm activations autocast can't shrink
-        # -- see CLAUDE.md's "Known bugs fixed") around for backward, only x/emb are kept
+        # -- see DEVELOPMENT_LOG.md's "Known bugs fixed") around for backward, only x/emb are kept
         # and the whole block is recomputed during backward. Only worth it (and only
         # active) while actually training -- there's no backward pass during eval/sampling,
         # so it would just add recompute overhead for nothing.

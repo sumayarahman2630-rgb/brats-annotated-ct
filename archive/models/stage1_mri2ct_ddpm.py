@@ -1,6 +1,6 @@
 """Stage 1 model: conditional DDPM operating in Haar-wavelet space for
 paired MRI -> CT translation, following cwdm's wavelet-domain-diffusion
-pattern (reimplemented independently -- see CLAUDE.md's architecture
+pattern (reimplemented independently -- see DEVELOPMENT_LOG.md's architecture
 decision record for the reasoning, not just "inspired by").
 
 Pipeline per training step:

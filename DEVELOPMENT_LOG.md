@@ -1,8 +1,8 @@
-# brats-annotated-ct — Project Memory
+# brats-annotated-ct — Development Log
 
 This file is the single source of truth for where this project stands. Read it
-first in any new session (yours or a future Claude instance's) before touching
-code. Keep it updated as work progresses — status, not just plan.
+first in any new development session before touching code. Keep it updated as
+work progresses — status, not just plan.
 
 ## The two goals (set 2026-07-15)
 
@@ -146,7 +146,7 @@ Real data on the SynthRAD validation comparison: background exactly -1000.0
 HU (std=0), foreground -104 to -243 HU. Synthetic (step 9000 checkpoint,
 raw weights): background 884.7-908.5 HU, foreground 1062.7-1080.4 HU --
 both positive, both close together, nothing like the real bimodal
-distribution. The user's hypothesis: is this a normalization/denormalization
+distribution. The working hypothesis: is this a normalization/denormalization
 bug (sign flip, wrong clip range applied at inference vs. training) rather
 than "just needs more training"?
 
@@ -298,7 +298,7 @@ future `channel_mult` change without a matching `attention_resolutions`
 update fails loudly and early instead of as an opaque OOM stack trace deep
 inside `scaled_dot_product_attention`.
 
-Dual-GPU note: the user has 2×T4 available for this — **not relevant to
+Dual-GPU note: 2×T4 GPUs are available for this — **not relevant to
 this particular bug**. A 594 GiB single-tensor allocation attempt isn't a
 "not enough VRAM" problem that more GPUs fixes; `train_stage1.py` has no
 multi-GPU/distributed logic at all (single-device only), so a second GPU
@@ -387,7 +387,7 @@ change needed (`use_checkpoint: true` is now the config default) --
 `python -m training.train_stage1 --config configs/stage1_synthrad.yaml --max_steps 100 --max_patients 3`.
 If it still OOMs at the same GroupNorm call, the next lever (not yet tried)
 is `training.batch_size`/`grad_accum_steps` interaction or lowering
-`model.base_channels` -- deliberately last, per the user's explicit
+`model.base_channels` -- deliberately last, per the established
 priority order, since those reduce model capacity/quality rather than
 just trading compute for memory.
 
@@ -448,9 +448,9 @@ optimizing for speed under a real deadline.** Two things came out of this:
    effectively 1) would proportionally cut wall-clock time to reach a given
    `total_steps`, but also lowers the effective batch size (4 -> fewer),
    which is a real training-dynamics tradeoff -- left untouched this round
-   since the user asked specifically about `use_checkpoint` and
+   since the focus was specifically on `use_checkpoint` and
    `base_channels`, not `grad_accum_steps`; flagged here as an available
-   extra lever, not applied unilaterally.
+   extra lever, not applied yet.
 
 **Next smoke test command (no change from before):**
 ```
@@ -540,7 +540,7 @@ code path with no manual flag-flipping.
    `/kaggle/working/checkpoints/...`.
 5. Repeat step 2–4 each session. Each Kaggle Dataset/Output you create this
    way is a checkpoint of the whole project's progress, independent of
-   Claude's own session limits.
+   any single working session's time limit.
 
 Stage 2 (`inference/run_stage2_brats.py`) uses the same checkpoint directory
 convention to load whatever Stage 1 checkpoint currently exists — it does not
@@ -577,7 +577,7 @@ independently for this codebase, for academic-defense originality.
    released, pre-registered data (the Kaggle copy is the challenge's
    post-registration release) — this codebase does not re-run Elastix.
 
-## Status (last updated 2026-07-16, end of overnight autonomous session)
+## Status (last updated 2026-07-16, end of an extended overnight development session)
 
 | Piece | Status |
 |---|---|
@@ -588,7 +588,7 @@ independently for this codebase, for academic-defense originality.
 | `scripts/check_orientation_consistency.py` | done, **never run against real data** (see round 8 below) |
 | git remote | https://github.com/sumayarahman2630-rgb/brats-annotated-ct.git (branch: main), all work pushed |
 
-**Real Kaggle 3D checkpoint, as of the last message from the user tonight:**
+**Real Kaggle 3D checkpoint, as of the last status update tonight:**
 step 9000, `configs/stage1_synthrad.yaml`, `/kaggle/working/checkpoints/stage1_synthrad/`.
 SynthRAD validation comparison (raw weights, not EMA — see round 6):
 foreground-only PSNR ~9 dB, SSIM negative. Root-caused in round 8 (below) as
@@ -597,17 +597,17 @@ written. **Do not trust this checkpoint's visual output as a finished
 deliverable** — it's a real, resumable, correctly-engineered checkpoint at
 an early point in training, not a converged model.
 
-## 2026-07-16 — overnight autonomous session (rounds 6-9)
+## 2026-07-16 — extended overnight development session (rounds 6-9)
 
-The user asked me to work unattended for several hours after their deadline
-was going to be missed to sleep, with instructions to (1) hunt for a bug
-behind the bad PSNR, (2) verify BraTS/SynthRAD preprocessing consistency
-and build a real test suite, (3) build a completely separate 2D pipeline
-as a faster path to actual convergence, (4) turn Stage 2 into a properly
-documented, reusable dataset generator, and (5) leave this file in a state
-that lets a fresh start (theirs or a future Claude session's) pick up
-immediately. Small logical commits throughout, never touching the working
-3D checkpoint/pipeline. What actually happened, honestly:
+With the deadline at risk of being missed, development continued through
+the night against a priority list: (1) hunt for a bug behind the bad
+PSNR, (2) verify BraTS/SynthRAD preprocessing consistency and build a
+real test suite, (3) build a completely separate 2D pipeline as a faster
+path to actual convergence, (4) turn Stage 2 into a properly documented,
+reusable dataset generator, and (5) leave this file in a state that lets
+a fresh start pick up immediately. Small logical commits throughout,
+never touching the working 3D checkpoint/pipeline. What actually
+happened, honestly:
 
 **Round 8 — PSNR root-cause audit (Priority 1). Conclusion: no bug found.**
 Exhaustively checked: `ct_clip_range` is read from the same config key

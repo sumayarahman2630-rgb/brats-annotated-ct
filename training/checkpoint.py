@@ -1,5 +1,5 @@
 """Checkpoint save/find/load, shared by training (resume) and inference
-(load whatever Stage 1 checkpoint currently exists). See CLAUDE.md's
+(load whatever Stage 1 checkpoint currently exists). See DEVELOPMENT_LOG.md's
 "Resumability strategy" section for why this is structured this way --
 short version: numbered-by-step files are the source of truth for "which
 checkpoint is newest" (both within one Kaggle session and across a fresh

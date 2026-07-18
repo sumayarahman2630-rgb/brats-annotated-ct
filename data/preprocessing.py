@@ -3,7 +3,7 @@
 HU clip/normalize, MRI percentile-normalize, brain-mask apply/crop/pad.
 Having exactly one implementation of each of these is what guarantees
 Stage 2's BraTS input is normalized identically to what Stage 1 trained on
-(see CLAUDE.md's "domain gap" note for why that match matters here more
+(see DEVELOPMENT_LOG.md's "domain gap" note for why that match matters here more
 than in a typical pipeline). Everything here follows SynthRAD2023's
 official preprocessing conventions (resample, clip, mask-based background
 fill, bbox crop).

@@ -8,7 +8,7 @@ target, since there's no wavelet decomposition here.
 
 Kept as a fully separate class/file from the 3D model rather than sharing
 code, deliberately: this pipeline exists specifically so a bug or dead end
-in the 3D pipeline can never affect it, and vice versa (see CLAUDE.md).
+in the 3D pipeline can never affect it, and vice versa (see DEVELOPMENT_LOG.md).
 """
 from __future__ import annotations
 

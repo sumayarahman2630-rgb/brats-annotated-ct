@@ -205,7 +205,7 @@ def quick_validation(
 ):
     """L1 + foreground PSNR over up to max_patients val patients, on RAW
     (non-EMA) weights -- matches training loss's own weights, and avoids the
-    EMA-cold-start pitfall documented in CLAUDE.md (round 6): this validation
+    EMA-cold-start pitfall documented in DEVELOPMENT_LOG.md (round 6): this validation
     exists to track raw-weight training progress, not to judge EMA quality.
 
     Center-crops each val volume to `patch_size` (same as training) rather
@@ -302,7 +302,7 @@ def main():
     global_step = 0
     if latest_ckpt is not None:
         global_step, _extra = load_checkpoint(latest_ckpt, model, ema, optimizer, scheduler, map_location=device.type)
-        ema.decay = train_cfg.get("ema_decay", 0.999)  # same re-apply-from-config fix as train_stage1.py (round 8) -- see CLAUDE.md
+        ema.decay = train_cfg.get("ema_decay", 0.999)  # same re-apply-from-config fix as train_stage1.py (round 8) -- see DEVELOPMENT_LOG.md
         log.info("Resumed from checkpoint %s at step %d", latest_ckpt, global_step)
     else:
         log.info("No checkpoint found in %s -- starting from scratch", search_dirs)

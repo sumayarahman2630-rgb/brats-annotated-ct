@@ -2,7 +2,7 @@
 
 CPU-only, no GPU or real dataset access required -- all tests build small
 synthetic data fixtures. Formalizes the ad-hoc verification performed
-throughout this project's development (see CLAUDE.md for the narrative
+throughout this project's development (see DEVELOPMENT_LOG.md for the narrative
 version of each finding).
 
 Covers the **active regression pipeline** (the one that actually reached a
@@ -49,9 +49,9 @@ python -m pytest tests/ -v -m "not slow"
 
 - Actual training convergence/loss trajectory on real SynthRAD data (though
   the regression pipeline's real result -- 28.21 dB foreground PSNR at step
-  20000 -- is documented in CLAUDE.md and the main README).
+  20000 -- is documented in DEVELOPMENT_LOG.md and the main README).
 - Real memory/OOM behavior at production model/volume size on a real GPU
-  beyond what's already been hit and fixed once (see CLAUDE.md).
+  beyond what's already been hit and fixed once (see DEVELOPMENT_LOG.md).
 - The image-orientation-consistency question raised in round 8 -- checked
-  and ruled out on real data, see CLAUDE.md and
+  and ruled out on real data, see DEVELOPMENT_LOG.md and
   `scripts/check_orientation_consistency.py`.

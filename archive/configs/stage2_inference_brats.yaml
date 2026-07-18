@@ -3,7 +3,7 @@
 # MICCAI_BraTS2020_TrainingData, each containing <patient_id>_t1.nii and
 # <patient_id>_seg.nii (plus _t1ce/_t2/_flair, which are ignored -- only
 # t1 and seg are used). Use ONLY the TrainingData half of this dataset;
-# ValidationData has no seg.nii, so it can't be paired. See CLAUDE.md's
+# ValidationData has no seg.nii, so it can't be paired. See DEVELOPMENT_LOG.md's
 # "Kaggle dataset paths" section -- this is final, don't re-derive it.
 
 stage1_config: "configs/stage1_synthrad.yaml"   # reused for model architecture + checkpoint location + preprocessing params

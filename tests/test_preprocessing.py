@@ -1,7 +1,7 @@
 """Preprocessing correctness checks. CPU-only, no GPU required.
 
 Includes the exact numerical checks run ad-hoc during the round-8 PSNR
-audit (CLAUDE.md) that ruled out a normalization sign-flip/parameter-
+audit (DEVELOPMENT_LOG.md) that ruled out a normalization sign-flip/parameter-
 mismatch bug -- formalized here so they run automatically instead of
 being re-derived by hand next time this comes up.
 """
@@ -54,7 +54,7 @@ def test_normalized_zero_maps_to_clip_range_midpoint():
     midpoint, (CT_CLIP_LOW + CT_CLIP_HIGH) / 2 = 1000 HU -- NOT 0 HU, because
     the range is asymmetric. An undertrained model whose raw output clusters
     near normalized zero will look like it's outputting "positive HU" purely
-    because of this, not because of a sign error. See CLAUDE.md round 8."""
+    because of this, not because of a sign error. See DEVELOPMENT_LOG.md round 8."""
     assert denormalize_ct(np.array([0.0]))[0] == pytest.approx(1000.0, abs=1e-4)
     assert denormalize_ct(np.array([0.0]))[0] == pytest.approx((CT_CLIP_LOW + CT_CLIP_HIGH) / 2, abs=1e-4)
 

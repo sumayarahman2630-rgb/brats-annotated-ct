@@ -12,7 +12,7 @@ trained on.
 Deliberately uses RAW checkpoint weights only: no EMA object is even
 constructed here, so there is no `ema.copy_to(model)` call anywhere in this
 script for a stray flag to accidentally re-enable -- structurally can't
-reintroduce the EMA-contamination bug documented in CLAUDE.md's "Known bugs
+reintroduce the EMA-contamination bug documented in DEVELOPMENT_LOG.md's "Known bugs
 fixed" (round 6).
 
 Run as:

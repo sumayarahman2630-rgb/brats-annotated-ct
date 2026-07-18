@@ -11,7 +11,7 @@ their NIfTI headers (e.g. one LPS+, the other RAS+, or an axis permutation),
 then a "D" index in a SynthRAD-trained model's condition input would NOT
 correspond to the same physical direction in a BraTS input -- a real
 conditioning mismatch that's independent of (and potentially compounds) the
-undertraining issue investigated in CLAUDE.md's round-8 PSNR audit.
+undertraining issue investigated in DEVELOPMENT_LOG.md's round-8 PSNR audit.
 
 This could NOT be verified from the development machine (no access to the
 real SynthRAD/BraTS files). Run this on Kaggle, pointed at one real SynthRAD

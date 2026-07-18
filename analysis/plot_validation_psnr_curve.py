@@ -5,7 +5,7 @@ Input: the CSV written by training/train_stage1_regression.py's
 init_log_file/append_log_row (columns: step, split, l1_loss, psnr_fg_db,
 lr, elapsed_sec). Only rows with split == "val" and a non-empty psnr_fg_db
 are plotted -- val rows only appear when quick_validation successfully
-completes (see CLAUDE.md: a validation OOM at a given step is now logged
+completes (see DEVELOPMENT_LOG.md: a validation OOM at a given step is now logged
 as a warning and skipped, not a crash, so a gap in the curve at a given
 step means that step's validation was skipped, not that training stopped).
 

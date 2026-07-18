@@ -3,7 +3,7 @@ SynthRAD2023 brain cohort. Run as:
 
     python -m training.train_stage1 --config configs/stage1_synthrad.yaml
 
-Resumability (see CLAUDE.md for the full explanation): on startup this
+Resumability (see DEVELOPMENT_LOG.md for the full explanation): on startup this
 script searches checkpoint.working_dir plus every directory listed in
 checkpoint.extra_resume_dirs for the checkpoint with the highest step
 count, and resumes from it automatically -- exact same code path whether
