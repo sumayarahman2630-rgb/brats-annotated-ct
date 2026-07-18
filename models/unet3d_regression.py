@@ -176,6 +176,15 @@ class UNet3DRegression(nn.Module):
         time-constrained.
         """
         self.eval()
+        divisor = 2 ** (self.num_levels - 1)
+        if any(p % divisor != 0 for p in patch_size):
+            raise ValueError(
+                f"patch_size {patch_size} must be divisible by {divisor} (2**(num_levels-1), "
+                f"num_levels={self.num_levels}) -- each tile is fed through the same encoder/decoder "
+                "as training, and a non-divisible size makes the skip-connection feature maps "
+                "mismatch in shape (crashes inside forward() with a confusing torch.cat error "
+                "instead of this clear one)."
+            )
         _, _, D, H, W = mri.shape
         pd, ph, pw = patch_size
         stride = (

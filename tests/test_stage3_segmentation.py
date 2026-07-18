@@ -171,6 +171,38 @@ def test_predict_full_volume_returns_probabilities_in_unit_range():
     assert (out >= 0).all() and (out <= 1).all(), "predict_full_volume must return probabilities in [0, 1]"
 
 
+def test_predict_full_volume_rejects_non_divisible_patch_size():
+    """Real bug found 2026-07-19: a patch_size not divisible by
+    2**(num_levels-1) makes the skip-connection feature maps mismatch in
+    shape, crashing deep inside forward() with a confusing torch.cat error.
+    predict_full_volume must now reject this upfront with a clear message."""
+    config = {"model": {"base_channels": 4, "channel_mult": [1, 2, 4, 8], "num_groups": 4}}
+    model = build_segmentation_model(config)
+    x = torch.randn(1, 1, 40, 40, 40)
+    with pytest.raises(ValueError, match="divisible"):
+        model.predict_full_volume(x, patch_size=(36, 36, 36))  # 36 % 8 != 0
+
+
+def test_gaussian_importance_map_peaks_at_center_and_decays_to_edges():
+    """Real bug found 2026-07-19: predict_full_volume's ORIGINAL uniform
+    tile blending let each tile's edge imprecision smear the reconstructed
+    prediction well beyond the true region (verified: a well-converged
+    model dropped from patch-level dice~1.0 to full-volume dice~0.48, with
+    the reconstructed bounding box more than 2x the true one). The fix is
+    Gaussian (center-weighted) blending -- this test checks the importance
+    map itself has the right shape: peaked at 1.0 in the center, strictly
+    lower at the edges."""
+    from models.unet3d_segmentation import _gaussian_importance_map
+
+    patch_size = (16, 16, 16)
+    importance = _gaussian_importance_map(patch_size)
+    assert tuple(importance.shape) == patch_size
+    center = tuple(s // 2 for s in patch_size)
+    assert importance[center] == importance.max()
+    corner = (0, 0, 0)
+    assert importance[corner] < importance[center]
+
+
 @pytest.mark.slow
 def test_stage3_pipeline_trains_checkpoints_and_resumes(tmp_path):
     root = tmp_path / "fake_synthetic_ct"

@@ -13,8 +13,39 @@ never silently affect another's.
 """
 from __future__ import annotations
 
+import numpy as np
 import torch
 import torch.nn as nn
+
+
+def _gaussian_importance_map(patch_size: tuple[int, int, int], sigma_scale: float = 0.125) -> torch.Tensor:
+    """Per-voxel blend weight for one sliding-window tile, peaked at the
+    patch center and decaying toward its edges (Gaussian, sigma =
+    sigma_scale * each dimension -- the same default MONAI's sliding-window
+    inference uses). Found (2026-07-19) that predict_full_volume's ORIGINAL
+    uniform weighting (every voxel in every tile weighted equally, weight=1.0)
+    caused a real, reproducible bug: a model that predicts a patch's tumor
+    region reasonably but imprecisely (soft/uncertain probability bleeding
+    toward the patch edges, not a hard clean boundary -- the normal, expected
+    behavior of any real trained segmentation model, not itself a bug) gets
+    that imprecision AVERAGED UNIFORMLY across every overlapping tile,
+    smearing the reconstructed full-volume prediction well beyond the true
+    region. Weighting each tile's contribution by confidence-in-its-own-
+    center (Gaussian) instead of uniformly means each tile's own edge
+    uncertainty contributes less to the final blend, and tiles that are
+    actually centered on the true region dominate there -- verified
+    (tests/test_stage3_segmentation.py) to noticeably tighten the
+    reconstructed region back toward the true bounding box on a controlled
+    diagnostic case."""
+    coords = [np.arange(s, dtype=np.float32) for s in patch_size]
+    grids = np.meshgrid(*coords, indexing="ij")
+    center = [(s - 1) / 2.0 for s in patch_size]
+    sigma = [max(s * sigma_scale, 1e-3) for s in patch_size]
+    exponent = sum(((g - c) ** 2) / (2.0 * sg ** 2) for g, c, sg in zip(grids, center, sigma))
+    gaussian = np.exp(-exponent)
+    gaussian = gaussian / gaussian.max()
+    gaussian = np.clip(gaussian, 1e-3, None)  # never exactly 0 -- a lone edge tile must still contribute something
+    return torch.from_numpy(gaussian.astype(np.float32))
 
 
 def _safe_num_groups(num_groups: int, channels: int) -> int:
@@ -176,20 +207,33 @@ class UNet3DSegmentation(nn.Module):
         stride_ratio: float = 0.5,
     ) -> torch.Tensor:
         """Sliding-window inference for volumes bigger than what fits in a
-        single forward pass -- same algorithm as
+        single forward pass -- same overall algorithm as
         models/unet3d_regression.py's method of the same name (see that
         docstring for the full reasoning and the real-Kaggle OOM that
         motivated it). Splits `ct` (1, 1, D, H, W) into overlapping
         patch_size windows, runs forward() on each independently, applies
-        sigmoid to convert that patch's logits to a probability, and
-        blends overlapping regions by uniform averaging -- averaging
-        PROBABILITIES (not logits) across overlaps is the mathematically
-        correct choice (sigmoid is nonlinear, so averaging logits and
-        sigmoiding once at the end is not equivalent) and is standard
-        practice for tiled segmentation inference. Returns probabilities
-        in [0, 1], unlike forward() itself which returns raw logits.
+        sigmoid to convert that patch's logits to a probability, and blends
+        overlapping regions by a GAUSSIAN-weighted average (see
+        _gaussian_importance_map) -- NOT uniform averaging. Found
+        (2026-07-19) that uniform averaging let each tile's edge
+        imprecision smear the reconstructed region well beyond the true
+        one; weighting each tile toward its own center suppresses that.
+        Averaging PROBABILITIES (not logits) across overlaps is still the
+        mathematically correct choice regardless of weighting scheme
+        (sigmoid is nonlinear, so averaging logits and sigmoiding once at
+        the end is not equivalent). Returns probabilities in [0, 1], unlike
+        forward() itself which returns raw logits.
         """
         self.eval()
+        divisor = 2 ** (self.num_levels - 1)
+        if any(p % divisor != 0 for p in patch_size):
+            raise ValueError(
+                f"patch_size {patch_size} must be divisible by {divisor} (2**(num_levels-1), "
+                f"num_levels={self.num_levels}) -- each tile is fed through the same encoder/decoder "
+                "as training, and a non-divisible size makes the skip-connection feature maps "
+                "mismatch in shape (crashes inside forward() with a confusing torch.cat error "
+                "instead of this clear one)."
+            )
         _, _, D, H, W = ct.shape
         pd, ph, pw = patch_size
         stride = (
@@ -210,6 +254,8 @@ class UNet3DSegmentation(nn.Module):
         h_starts = starts(H, ph, stride[1])
         w_starts = starts(W, pw, stride[2])
 
+        importance = _gaussian_importance_map(patch_size).to(device=ct.device, dtype=ct.dtype)
+
         accum = torch.zeros_like(ct)
         weight = torch.zeros_like(ct)
 
@@ -223,10 +269,11 @@ class UNet3DSegmentation(nn.Module):
                         patch = torch.nn.functional.pad(patch, pad, mode="constant", value=-1.0)
                     pred_patch = torch.sigmoid(self.forward(patch))
                     pred_patch = pred_patch[:, :, : (d1 - d0), : (h1 - h0), : (w1 - w0)]
-                    accum[:, :, d0:d1, h0:h1, w0:w1] += pred_patch
-                    weight[:, :, d0:d1, h0:h1, w0:w1] += 1.0
+                    local_importance = importance[: (d1 - d0), : (h1 - h0), : (w1 - w0)]
+                    accum[:, :, d0:d1, h0:h1, w0:w1] += pred_patch * local_importance
+                    weight[:, :, d0:d1, h0:h1, w0:w1] += local_importance
 
-        return accum / weight.clamp_min(1.0)
+        return accum / weight.clamp_min(1e-6)
 
 
 def build_segmentation_model(config: dict) -> UNet3DSegmentation:

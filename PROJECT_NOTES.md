@@ -1037,3 +1037,95 @@ re-derive this reasoning:
   "tumor-specific radiomics" study** -- the two are genuinely different
   claims, and this project's data supports only the former. Don't
   conflate them in whatever radiomics work eventually gets built.
+
+## Stage 3 investigation: predicted-mask location mismatch (2026-07-19)
+
+A real Kaggle run's validation visualization showed the predicted tumor
+mask in a clearly different location than the ground truth (large blob
+bottom-left in the real mask; scattered fragments top-left and right in
+the prediction), on the SYNTHETIC (in-distribution) validation set, not
+just Jordan -- reported as urgent since it suggested a possible core
+coordinate/pairing bug rather than a Jordan-specific domain-gap issue.
+Investigated with controlled CPU diagnostics (single fake patient, known
+asymmetric tumor location, deliberately overfitting a tiny model) rather
+than guessing from code reading alone.
+
+**Definitively ruled out: no coordinate/axis/mask-pairing bug.** A model
+trained with Dice-only loss directly on a full volume (no patching,
+bypassing the sliding-window path entirely) reaches Dice=1.0 with the
+predicted centroid landing exactly on the true tumor location. This rules
+out an axis flip, transpose, or misalignment anywhere in
+data/loaders_synthetic_ct.py's crop+pad pipeline, the model's forward()
+pass, or the visualization script's slice indexing -- if any of those had
+a coordinate bug, this direct-forward test could not have reached perfect,
+correctly-located overlap.
+
+**A real, separate bug found and fixed:** `predict_full_volume` (both
+models/unet3d_segmentation.py and models/unet3d_regression.py) crashed
+with a confusing `torch.cat` shape-mismatch error if `patch_size` wasn't
+divisible by `2**(num_levels-1)` -- the skip-connection feature maps don't
+line up otherwise. Now raises a clear `ValueError` upfront instead. The
+real configs' `patch_size: [96, 96, 64]` already satisfies this (divisible
+by 8), so this specific crash is unlikely to be what produced the reported
+visualization, but it's a real robustness gap now closed regardless.
+
+**The actual reconstruction-quality issue: reproduced, partially
+understood, not fully resolved.** Controlled testing showed a real,
+reproducible pattern: a model trained via patch-based sampling (matching
+the real pipeline) with a smooth, steadily-decreasing training loss --
+i.e. not obviously undertrained or unstable by the loss curve alone --
+still reconstructs a full-volume prediction via `predict_full_volume`
+that is shifted and expanded well beyond the true region (e.g. one run:
+patch-level Dice reached 1.0 during training, but the full-volume
+reconstruction scored only 0.48, with a bounding box roughly 3x the true
+one, anchored at the correct starting corner but bleeding outward).
+
+The natural hypothesis -- that predict_full_volume's original UNIFORM
+overlap-blending let each tile's imprecise, uncertain edge predictions
+smear the reconstruction outward -- led to switching to Gaussian
+(center-weighted) blending, the standard fix for exactly this class of
+problem in tiled medical-image inference (MONAI's default approach; see
+`_gaussian_importance_map` in models/unet3d_segmentation.py). **This did
+NOT resolve it in testing** -- dice dropped slightly further (0.48 ->
+0.39) and the reconstructed bounding box was identical in extent, just
+denser. This disproves the "edge-blur" hypothesis as the primary cause,
+at least at the tiny scale tested.
+
+Repeated attempts to get a controlled, single-patient toy model to
+converge STABLY also surfaced a separate, likely-more-relevant finding:
+**this loss/architecture combination is prone to real training
+instability at small scale** -- across several runs, patch-level Dice
+sometimes reached 1.0 mid-training then collapsed back toward 0, and a
+smaller/shorter run collapsed to predicting an entirely empty mask despite
+otherwise-reasonable-looking hyperparameters. This is consistent with
+known Dice+BCE-under-severe-class-imbalance instability (tumor is a tiny
+fraction of any patch, even foreground-biased ones), though lowering
+`bce_weight` alone (tried 1.0 and 0.05) did not fix it either -- the
+interaction is more complex than a simple loss-term-weight issue. A
+CPU-only, single-patient, few-hundred-step diagnostic is a fundamentally
+low-power setting to fully characterize an optimization stability
+question; a first regression test attempting to lock in "converges and
+reconstructs correctly" as a guard was written, found to be flaky (passed
+under one set of scale/step parameters, failed under a very similar one),
+and removed rather than kept in a misleading, unreliable state.
+
+**What's kept from this investigation:** the `predict_full_volume`
+divisibility validation (unambiguously correct, keep), Gaussian blending
+(standard practice, not proven harmful, plausibly still net-positive at
+real scale with real data diversity even though it didn't fix the toy
+case -- keep as the more defensible default over uniform blending), two
+new fast/reliable unit tests (Gaussian importance map shape,
+divisibility-rejection).
+
+**What's NOT resolved, and the concrete next step:** whether the real
+Kaggle checkpoint's mislocated prediction is explained by (a) genuine
+undertraining that more real steps will fix, (b) the instability pattern
+found here, requiring a loss-function change beyond bce_weight tuning
+(candidates for a future session: Tversky loss, focal loss, or per-batch
+positive-class weighting in BCE), or (c) something specific to real BraTS
+tumor shapes/scale that this toy diagnostic's simple cube couldn't
+surface. **The single most useful piece of evidence to resolve this
+next**: the real run's training log CSV (step, split, loss, dice_score
+columns from training/train_stage3_segmentation.py) -- a smooth,
+monotonically improving curve would point to (a); a plateaued or
+oscillating one would point to (b).
