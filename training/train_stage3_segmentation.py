@@ -118,26 +118,118 @@ def dice_score(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5,
     return dice.mean().item()
 
 
-def combined_loss(logits: torch.Tensor, target: torch.Tensor, bce_weight: float) -> torch.Tensor:
-    """Dice + BCE, the standard combination for segmentation with severe
-    foreground/background imbalance: Dice directly rewards overlap with
-    the (small) tumor region regardless of its size; BCE gives a smooth,
-    well-behaved per-voxel gradient everywhere, including on patches with
-    no foreground at all (where dice_loss's smoothing term alone gives a
-    weak signal).
+def tversky_loss(pred: torch.Tensor, target: torch.Tensor, alpha: float = 0.3, beta: float = 0.7, smooth: float = 1.0) -> torch.Tensor:
+    """Tversky loss: generalizes Dice by weighting false positives (alpha)
+    and false negatives (beta) separately, instead of implicitly 1:1 --
+    Tversky index = (TP+smooth) / (TP + alpha*FP + beta*FN + smooth), loss
+    = 1 - index. alpha=beta=0.5 reduces exactly to Dice. Added 2026-07-19
+    after a real Kaggle run showed Dice+BCE collapsing to predicting an
+    essentially empty mask (external Jordan validation dice ~0.0005-0.013,
+    uniformly near-zero) -- beta>alpha (the default here) penalizes missed
+    tumor (false negatives) more than false alarms, which is the standard
+    remedy for exactly this "model gives up and predicts background
+    everywhere" failure mode under severe class imbalance. `pred` must
+    already be a probability in [0, 1] (sigmoid applied by the caller, same
+    convention as dice_loss)."""
+    pred_flat = pred.reshape(pred.shape[0], -1)
+    target_flat = target.reshape(target.shape[0], -1)
+    tp = (pred_flat * target_flat).sum(dim=1)
+    fp = (pred_flat * (1.0 - target_flat)).sum(dim=1)
+    fn = ((1.0 - pred_flat) * target_flat).sum(dim=1)
+    tversky_index = (tp + smooth) / (tp + alpha * fp + beta * fn + smooth)
+    return 1.0 - tversky_index.mean()
 
-    Takes RAW LOGITS (models/unet3d_segmentation.py's forward() no longer
-    applies sigmoid itself) -- torch.nn.functional.binary_cross_entropy /
-    BCELoss are explicitly unsafe under CUDA autocast (they require an
-    already-in-[0,1] input, which fp16 casting can silently corrupt), and
-    this crashed on a real Kaggle GPU (2026-07-19) before this fix.
-    F.binary_cross_entropy_with_logits fuses the sigmoid and the loss in a
-    numerically stable, autocast-safe way, so BCE uses that directly on
-    the logits. Dice still needs an actual probability to compute overlap
-    against a 0/1 target, so sigmoid is applied explicitly, once, just for
-    that half of the loss."""
+
+def focal_tversky_loss(pred: torch.Tensor, target: torch.Tensor, alpha: float = 0.3, beta: float = 0.7, gamma: float = 0.75, smooth: float = 1.0) -> torch.Tensor:
+    """Focal Tversky loss: raises (1 - Tversky index) to the power gamma,
+    which (for gamma < 1) further increases the gradient contribution from
+    hard/already-mostly-wrong examples relative to easy ones -- an
+    additional lever against the same collapse-to-empty failure mode
+    tversky_loss addresses, usable together with it."""
+    pred_flat = pred.reshape(pred.shape[0], -1)
+    target_flat = target.reshape(target.shape[0], -1)
+    tp = (pred_flat * target_flat).sum(dim=1)
+    fp = (pred_flat * (1.0 - target_flat)).sum(dim=1)
+    fn = ((1.0 - pred_flat) * target_flat).sum(dim=1)
+    tversky_index = (tp + smooth) / (tp + alpha * fp + beta * fn + smooth)
+    return ((1.0 - tversky_index) ** gamma).mean()
+
+
+def focal_loss_with_logits(logits: torch.Tensor, target: torch.Tensor, gamma: float = 2.0, alpha: float = 0.25) -> torch.Tensor:
+    """Per-voxel focal loss (Lin et al. 2017), adapted for binary
+    segmentation: down-weights voxels the model already classifies
+    confidently and correctly (the vast, easy majority of background
+    voxels under severe imbalance), concentrating gradient on hard/
+    ambiguous ones -- a direct counter to BCE's tendency to be dominated by
+    the easy-background majority.
+
+    Takes RAW LOGITS, like combined_loss below -- NOT computed as
+    `-alpha*(1-p)**gamma*log(p)` with `p` a directly-sigmoided probability,
+    which would reintroduce the exact autocast-unsafe numerical pattern
+    already found and fixed once in this file (2026-07-19, see
+    combined_loss's docstring). Instead this uses the standard stable
+    trick (also how torchvision's own sigmoid_focal_loss is implemented):
+    get the per-voxel BCE via the already-safe binary_cross_entropy_with_logits,
+    then recover p_t = exp(-bce) (mathematically exact, since bce = -log(p_t)
+    for the correct class by construction), and apply the focal modulating
+    factor on top of that -- no unsafe log(sigmoid(x)) call anywhere."""
+    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+    p_t = torch.exp(-bce)
+    alpha_t = alpha * target + (1.0 - alpha) * (1.0 - target)
+    focal_weight = alpha_t * (1.0 - p_t) ** gamma
+    return (focal_weight * bce).mean()
+
+
+def combined_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    bce_weight: float,
+    loss_type: str = "dice_bce",
+    tversky_alpha: float = 0.3,
+    tversky_beta: float = 0.7,
+    focal_gamma: float = 2.0,
+    focal_alpha: float = 0.25,
+) -> torch.Tensor:
+    """Dispatches to one of several loss combinations for segmentation
+    under severe foreground/background imbalance, selected by
+    `loss_type` (training.loss_type in the config):
+
+    - "dice_bce" (default, unchanged since this file's original version):
+      Dice directly rewards overlap regardless of the tumor's size; BCE
+      gives a smooth, well-behaved per-voxel gradient everywhere,
+      including on patches with no foreground at all. Found (2026-07-19,
+      real Kaggle run) to be prone to collapsing toward predicting an
+      empty mask under this project's actual class imbalance -- kept as
+      the default for backward compatibility, not because it's
+      recommended over the alternatives below.
+    - "tversky": tversky_loss alone, beta>alpha penalizing missed tumor
+      more than false alarms -- the standard fix for the collapse-to-empty
+      failure mode above.
+    - "focal_tversky": focal_tversky_loss alone -- an additional lever on
+      top of the same idea.
+    - "focal": focal_loss_with_logits alone -- addresses the same
+      underlying problem from BCE's side instead of Dice's.
+
+    Takes RAW LOGITS in every branch (models/unet3d_segmentation.py's
+    forward() does not apply sigmoid itself) -- torch.nn.functional.
+    binary_cross_entropy / BCELoss are explicitly unsafe under CUDA
+    autocast (they require an already-in-[0,1] input, which fp16 casting
+    can silently corrupt), and this crashed on a real Kaggle GPU
+    (2026-07-19) before that fix. Every branch here either uses
+    F.binary_cross_entropy_with_logits directly or only ever calls
+    torch.sigmoid on logits explicitly (never combined with a manual log()
+    the way the original bug did)."""
     probs = torch.sigmoid(logits)
-    return dice_loss(probs, target) + bce_weight * F.binary_cross_entropy_with_logits(logits, target)
+    if loss_type == "dice_bce":
+        return dice_loss(probs, target) + bce_weight * F.binary_cross_entropy_with_logits(logits, target)
+    elif loss_type == "tversky":
+        return tversky_loss(probs, target, alpha=tversky_alpha, beta=tversky_beta)
+    elif loss_type == "focal_tversky":
+        return focal_tversky_loss(probs, target, alpha=tversky_alpha, beta=tversky_beta)
+    elif loss_type == "focal":
+        return focal_loss_with_logits(logits, target, gamma=focal_gamma, alpha=focal_alpha)
+    else:
+        raise ValueError(f"Unknown training.loss_type {loss_type!r} -- expected one of: dice_bce, tversky, focal_tversky, focal.")
 
 
 def init_log_file(path: str, resuming: bool) -> None:
@@ -181,14 +273,17 @@ def _center_crop_batch_to_patch(batch: dict, patch_size: tuple[int, int, int] | 
 @torch.no_grad()
 def quick_validation(
     model, val_loader, device, max_patients: int, amp_enabled: bool,
-    bce_weight: float, patch_size: tuple[int, int, int] | None,
+    loss_kwargs: dict, patch_size: tuple[int, int, int] | None,
 ):
     """Combined loss + Dice score over up to max_patients val patients, on
     RAW (non-EMA) weights -- matches training loss's own weights, same
     anti-EMA-contamination reasoning as Stage 1. Center-crops each val
     volume to `patch_size` rather than running full-volume inference (see
     _center_crop_batch_to_patch) -- this periodic check is a patch-level
-    signal, not a whole-brain one.
+    signal, not a whole-brain one. `loss_kwargs` is passed straight through
+    to combined_loss (bce_weight, loss_type, tversky_alpha, ...) so
+    validation always scores with the exact same loss configuration
+    training uses.
     """
     model.eval()
     total_loss = 0.0
@@ -202,7 +297,7 @@ def quick_validation(
         ct, mask = batch["ct"].to(device), batch["mask"].to(device)
         with autocast_ctx:
             logits = model(ct)
-        total_loss += combined_loss(logits.float(), mask.float(), bce_weight).item()
+        total_loss += combined_loss(logits.float(), mask.float(), **loss_kwargs).item()
         total_dice += dice_score(torch.sigmoid(logits.float()), mask.float())
         n += 1
     model.train()
@@ -252,7 +347,15 @@ def main():
     log.info("Model parameter count: %.2fM", n_params / 1e6)
 
     train_cfg = config["training"]
-    bce_weight = train_cfg.get("bce_weight", 1.0)
+    loss_kwargs = {
+        "bce_weight": train_cfg.get("bce_weight", 1.0),
+        "loss_type": train_cfg.get("loss_type", "dice_bce"),
+        "tversky_alpha": train_cfg.get("tversky_alpha", 0.3),
+        "tversky_beta": train_cfg.get("tversky_beta", 0.7),
+        "focal_gamma": train_cfg.get("focal_gamma", 2.0),
+        "focal_alpha": train_cfg.get("focal_alpha", 0.25),
+    }
+    log.info("Using loss_type=%s (loss_kwargs=%s)", loss_kwargs["loss_type"], loss_kwargs)
     optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg["lr"], weight_decay=train_cfg.get("weight_decay", 0.0))
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
@@ -297,7 +400,7 @@ def main():
         optimizer.zero_grad(set_to_none=True)
         with autocast_ctx():
             logits = model(ct)
-            loss = combined_loss(logits, mask, bce_weight)
+            loss = combined_loss(logits, mask, **loss_kwargs)
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -325,7 +428,7 @@ def main():
         if global_step % val_interval == 0 or global_step == total_steps:
             try:
                 val_loss, val_dice = quick_validation(
-                    model, val_loader, device, val_max_patients, amp_enabled, bce_weight, val_patch_size,
+                    model, val_loader, device, val_max_patients, amp_enabled, loss_kwargs, val_patch_size,
                 )
                 elapsed = time.time() - t_start
                 log.info("step %d val: loss=%.5f dice=%.4f (over up to %d val patients)", global_step, val_loss, val_dice, val_max_patients)

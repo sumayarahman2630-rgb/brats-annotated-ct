@@ -47,7 +47,19 @@ training:
   lr_schedule: "cosine"
   warmup_steps: 200
   total_steps: 20000
-  bce_weight: 1.0                      # loss = dice_loss + bce_weight * bce_loss; equal weighting by default
+  # Real Kaggle run (2026-07-19, 20000 steps) confirmed Dice+BCE ("dice_bce", the
+  # original default) collapses toward predicting an essentially empty mask under
+  # this project's severe class imbalance -- external Jordan validation came back
+  # ~0.0005-0.013 Dice, uniformly near-zero. Switched the default here to "tversky"
+  # (beta > alpha deliberately penalizes missed tumor more than false alarms, the
+  # standard fix for exactly this collapse-to-empty failure mode). See
+  # PROJECT_NOTES.md's Stage 3 investigation section for the full evidence.
+  loss_type: "tversky"                  # dice_bce | tversky | focal_tversky | focal
+  bce_weight: 1.0                       # only used when loss_type: dice_bce
+  tversky_alpha: 0.3                    # false-positive weight (used by tversky / focal_tversky)
+  tversky_beta: 0.7                     # false-negative weight -- higher than alpha, penalizes missed tumor more
+  focal_gamma: 2.0                      # only used when loss_type: focal
+  focal_alpha: 0.25                     # only used when loss_type: focal
   amp: true
   grad_clip_norm: 1.0
   ema_decay: 0.999                      # EMA state saved for reference only -- inference/validate_jordan_segmentation.py always evaluates RAW weights, same anti-contamination pattern as Stage 1

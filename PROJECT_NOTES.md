@@ -1129,3 +1129,69 @@ next**: the real run's training log CSV (step, split, loss, dice_score
 columns from training/train_stage3_segmentation.py) -- a smooth,
 monotonically improving curve would point to (a); a plateaued or
 oscillating one would point to (b).
+
+### Follow-up: real training log confirmed (b), root cause identified, loss functions added
+
+The full real training log (all 820 rows, not just the periodic
+validation summary) was shared and settled the (a) vs (b) question
+decisively. Two things in it matter:
+
+1. **Steps 19950-20000 have `lr=0.0` exactly** (cosine schedule fully
+   decayed) -- the model's weights are frozen there. Yet loss still swings
+   0.786-0.963 and dice swings 0.343-0.566 across those frozen-weight
+   steps. A frozen model cannot produce that swing from its own
+   instability; the only thing changing step to step is which random
+   training patch got sampled. This means a meaningful part of the
+   apparent "wild oscillation" in per-step dice/loss is the metric's own
+   sensitivity to how much foreground a given patch happens to contain
+   (see next point), not pure optimization chaos -- worth knowing before
+   over-interpreting any single training log's noise in the future.
+2. **Several dice values are suspiciously round** (exactly 0.5000, 0.2000)
+   -- `dice = (2*I + smooth) / (P + T + smooth)` with `smooth=1.0` is
+   dominated by the smoothing constant whenever a patch's total
+   foreground+prediction voxel count is small (e.g. dice=0.5 exactly
+   follows from intersection=0, pred+target=1 voxel total). This doesn't
+   change the real conclusion below, but means per-step dice numbers
+   specifically (train or the patch-level periodic validation) are a
+   noisier signal than they look, especially early/late in a schedule
+   when gradients (and thus typical prediction confidence) are small.
+
+Separately, the external Jordan validation of the resulting checkpoint
+came back uniformly near-zero (~0.0005-0.013 Dice across all 83 slices,
+essentially no variance) -- more consistent with the checkpoint having
+collapsed to predicting an essentially empty mask than with pure random
+instability (which would be expected to show more spread: some slices
+coincidentally scoring higher, others near zero).
+
+**Root cause, as confirmed:** Dice+BCE under this project's severe
+class imbalance (a tumor is a tiny fraction of any patch, even
+foreground-biased ones) collapses toward predicting background
+everywhere -- a well-documented failure mode for this exact loss
+combination in the medical segmentation literature, not a data or
+coordinate bug (already ruled out above).
+
+**Fix implemented:** `training/train_stage3_segmentation.py` now
+supports `training.loss_type` (`dice_bce` | `tversky` | `focal_tversky` |
+`focal`), all operating on raw logits (no reintroduction of the
+autocast-unsafe pattern -- `focal_loss_with_logits` specifically uses the
+`exp(-bce_with_logits)` trick, not a direct `log(sigmoid(x))` call, for
+the same reason `combined_loss`'s BCE branch does). Default switched to
+`tversky` (`alpha=0.3`, `beta=0.7` -- penalizing missed tumor more than
+false alarms, the standard remedy for the collapse-to-empty pattern
+found here). `dice_bce` is kept, unchanged, as a selectable option for
+comparison, not because it's recommended. Five new unit tests verify:
+Tversky's perfect/zero-overlap sanity bounds, that the beta>alpha
+asymmetry actually penalizes false negatives more (the entire point of
+switching), Focal Tversky's sanity bounds, that
+`focal_loss_with_logits` is numerically exact against the naive unsafe
+formulation it avoids computing directly, and that `combined_loss`
+correctly dispatches on `loss_type` (and rejects an unknown one).
+Verified end to end with a real (tiny, fake-data) training run using
+`loss_type: tversky`. Full suite: 57/57 passing.
+
+**Not yet re-verified:** whether Tversky loss actually fixes the
+collapse on REAL BraTS-scale data -- that requires a real Kaggle retrain,
+which hasn't happened yet as of this note. The CPU-only verification here
+confirms the new loss functions are mathematically correct and wired up
+correctly, not that they solve the real-world problem; that's the next
+real-GPU checkpoint's job to confirm.

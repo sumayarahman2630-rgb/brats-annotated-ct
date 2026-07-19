@@ -17,7 +17,13 @@ import yaml
 from data.loaders_synthetic_ct import build_synthetic_ct_dataloaders, discover_synthetic_ct_patients
 from data.preprocessing import foreground_biased_patch_crop
 from models.unet3d_segmentation import build_segmentation_model
-from training.train_stage3_segmentation import combined_loss, dice_loss
+from training.train_stage3_segmentation import (
+    combined_loss,
+    dice_loss,
+    focal_loss_with_logits,
+    focal_tversky_loss,
+    tversky_loss,
+)
 
 
 def _write_fake_synthetic_ct(root, patient_ids, shape=(24, 24, 24)):
@@ -156,6 +162,92 @@ def test_combined_loss_matches_manual_sigmoid_bce_and_backpropagates():
     for p in model.parameters():
         if p.requires_grad:
             assert p.grad is not None and torch.isfinite(p.grad).all()
+
+
+def test_tversky_loss_perfect_and_zero_overlap():
+    """Perfect overlap -> loss near 0; zero overlap -> loss near 1 (same
+    sanity shape as dice_loss, just via the Tversky formula)."""
+    target = torch.zeros(1, 1, 8, 8, 8)
+    target[:, :, 2:5, 2:5, 2:5] = 1.0
+    perfect_pred = target.clone()
+    wrong_pred = 1.0 - target
+
+    assert tversky_loss(perfect_pred, target).item() < 1e-3
+    assert tversky_loss(wrong_pred, target).item() > 0.9
+
+
+def test_tversky_loss_penalizes_false_negatives_more_with_default_beta():
+    """With beta (0.7) > alpha (0.3), a prediction that misses real tumor
+    (false negative) must be penalized MORE than one with an equal-sized
+    false alarm (false positive) -- this asymmetry is the entire point of
+    switching to Tversky over plain Dice for this project's collapse-to-
+    empty failure mode."""
+    target = torch.zeros(1, 1, 10, 10, 10)
+    target[:, :, 4:6, 4:6, 4:6] = 1.0  # 8 true-positive voxels available
+
+    # Prediction A: half the true region (4 true positives, 4 false negatives, 0 false positives)
+    pred_misses_half = torch.zeros_like(target)
+    pred_misses_half[:, :, 4:6, 4:6, 4] = 1.0
+
+    # Prediction B: the whole true region PLUS an equal-sized false-positive blob elsewhere
+    pred_with_false_alarm = target.clone()
+    pred_with_false_alarm[:, :, 0:2, 0:2, 0:2] = 1.0
+
+    loss_fn_miss = tversky_loss(pred_misses_half, target)
+    loss_false_alarm = tversky_loss(pred_with_false_alarm, target)
+    assert loss_fn_miss.item() > loss_false_alarm.item(), (
+        "missing half the true tumor should be penalized more than a false alarm of the same size, "
+        "given tversky_beta > tversky_alpha"
+    )
+
+
+def test_focal_tversky_loss_perfect_and_zero_overlap():
+    target = torch.zeros(1, 1, 8, 8, 8)
+    target[:, :, 2:5, 2:5, 2:5] = 1.0
+    perfect_pred = target.clone()
+    wrong_pred = 1.0 - target
+
+    assert focal_tversky_loss(perfect_pred, target).item() < 1e-2
+    assert focal_tversky_loss(wrong_pred, target).item() > 0.5
+
+
+def test_focal_loss_with_logits_matches_manual_unsafe_computation():
+    """focal_loss_with_logits must be numerically equivalent to the naive
+    (autocast-unsafe) `-alpha_t * (1-p)**gamma * log(p)` formulation it's
+    designed to avoid computing directly -- verifies the exp(-bce) trick
+    doesn't just avoid the unsafe call, it computes the same thing."""
+    logits = torch.randn(2, 1, 8, 8, 8)
+    target = (torch.rand(2, 1, 8, 8, 8) > 0.8).float()
+    gamma, alpha = 2.0, 0.25
+
+    actual = focal_loss_with_logits(logits, target, gamma=gamma, alpha=alpha)
+
+    p = torch.sigmoid(logits)
+    p_t = p * target + (1 - p) * (1 - target)
+    alpha_t = alpha * target + (1 - alpha) * (1 - target)
+    bce_naive = F.binary_cross_entropy(p, target, reduction="none")
+    expected = (alpha_t * (1 - p_t) ** gamma * bce_naive).mean()
+
+    assert torch.allclose(actual, expected, atol=1e-5), f"{actual.item()} != {expected.item()}"
+
+
+def test_combined_loss_dispatches_by_loss_type():
+    """combined_loss must route to the right underlying loss for each
+    training.loss_type value, and reject anything else with a clear error
+    rather than silently falling back to a default."""
+    logits = torch.randn(1, 1, 8, 8, 8)
+    target = (torch.rand(1, 1, 8, 8, 8) > 0.7).float()
+
+    dice_bce_result = combined_loss(logits, target, bce_weight=1.0, loss_type="dice_bce")
+    tversky_result = combined_loss(logits, target, bce_weight=1.0, loss_type="tversky", tversky_alpha=0.3, tversky_beta=0.7)
+    focal_tversky_result = combined_loss(logits, target, bce_weight=1.0, loss_type="focal_tversky", tversky_alpha=0.3, tversky_beta=0.7)
+    focal_result = combined_loss(logits, target, bce_weight=1.0, loss_type="focal", focal_gamma=2.0, focal_alpha=0.25)
+
+    for result in (dice_bce_result, tversky_result, focal_tversky_result, focal_result):
+        assert torch.isfinite(result)
+
+    with pytest.raises(ValueError, match="Unknown training.loss_type"):
+        combined_loss(logits, target, bce_weight=1.0, loss_type="not_a_real_loss_type")
 
 
 def test_predict_full_volume_returns_probabilities_in_unit_range():
