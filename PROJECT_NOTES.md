@@ -1265,3 +1265,55 @@ real BraTS-scale data -- that's the next real-GPU run's job. This fix
 only guarantees the new run actually gets a usable learning rate; it
 doesn't guarantee `focal` loss itself is the right choice (that
 question is still open pending this retrain's results).
+
+### Follow-up: LR fix worked, but dice was still stuck -- focal_alpha was backwards
+
+After the warm-start fix above, the real retrain confirmed the LR itself
+was fixed (warmup completed, lr settled at the configured 0.0002 as
+expected). But dice (steps 200-625) kept landing on almost exactly one
+of two values -- ~0.0000 or exactly 0.5000 -- never in between, which
+looked like a new instability rather than gradual learning.
+
+It isn't a new instability; it's the same `smooth=1.0` dice-formula
+artifact from the earlier section, this time driven by per-patch tumor
+size instead of frozen weights. `dice_score` (train_stage3_segmentation.py)
+thresholds predictions at 0.5 before scoring: `(2I+1)/(P+T+1)`.
+`foreground_biased_patch_crop` (data/preprocessing.py) centers a crop on
+a *random* foreground voxel, then clamps to stay in-bounds -- so true
+tumor voxel count `T` per patch swings from a couple of voxels (crop
+clamped near the tumor's edge) to hundreds (well-centered), it is not
+constant. With the model's predictions `P` still ~0 (essentially nothing
+crossing the 0.5 threshold) and intersection `I`~=0, dice reduces to
+`1/(T+1)`: small `T` gives exactly 0.5000, large `T` rounds to 0.0000.
+Two clean artifacts of tiny/moderate counts, not two behavioral states --
+consistent with, not contradicting, the earlier "suspiciously round
+dice values" finding.
+
+The real signal underneath: `P`~=0 almost always means predictions are
+still not confidently crossing the threshold on tumor voxels at all,
+i.e. still collapsed, even under focal loss. Root cause found:
+`focal_alpha: 0.25` (the config default, copied from RetinaNet's
+anchor-imbalance tuning) is backwards for this problem. In
+`focal_loss_with_logits`'s `alpha_t = alpha*target + (1-alpha)*(1-target)`,
+alpha=0.25 gives *background* voxels weight 0.75 and *tumor* voxels
+weight 0.25 -- the already-overwhelming majority class was weighted 3x
+more than the rare class this project actually needs to learn, directly
+fighting the imbalance instead of countering it.
+
+**Fix:** flipped `focal_alpha` to `0.75` in
+`configs/stage3_ct_segmentation.yaml` (config-only change, no code
+touched) so tumor voxels get the higher weight their rarity calls for --
+mirroring the `tversky_beta=0.7 > tversky_alpha=0.3` asymmetry already
+used for the same reason elsewhere in this file. `focal_gamma=2.0` is
+left as-is (a standard, non-suspicious value; a secondary lever to
+revisit only if collapse persists after this fix). No test needed
+updating: `test_focal_loss_with_logits_matches_manual_unsafe_computation`
+exercises the formula generically with explicit alpha/gamma arguments,
+not the config's chosen default.
+
+**Not yet verified:** whether this actually gets predictions past the
+threshold on real BraTS-scale data -- that's the next retrain's job.
+Reuse the same warm-started checkpoint (no need to redo the LR reset,
+only the loss weighting changed) into a NEW `checkpoint.working_dir` /
+`training.log_file` pair, per the same collision-avoidance rule as the
+warm-start fix above.
