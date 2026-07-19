@@ -1195,3 +1195,73 @@ which hasn't happened yet as of this note. The CPU-only verification here
 confirms the new loss functions are mathematically correct and wired up
 correctly, not that they solve the real-world problem; that's the next
 real-GPU checkpoint's job to confirm.
+
+### Follow-up: resume was reviving the old dead LR, warm-start fix added
+
+After switching to `focal` loss and retraining, real dice still swung
+wildly (0.42 -> 0.0001 -> 0.37). Cause: the retrain resumed from the
+step-20000 checkpoint the normal way, which restores optimizer AND
+scheduler state along with the weights. That checkpoint's cosine
+schedule had already fully decayed to `lr=0.0` (see previous section) --
+so the new loss function started with essentially zero learning rate
+and no room to move the weights anywhere. This is the same class of bug
+as Stage 1's round-6 "config value silently reverts on resume" family
+(`ema.decay`, `subband_loss_weights`): a checkpoint's saved state
+silently overrides the current config's intent unless something
+explicitly re-applies it.
+
+**Fix:** new `--warm_start_checkpoint <path>` CLI flag on
+`training/train_stage3_segmentation.py`. When passed, it loads *only*
+the model weights from that exact checkpoint file (`ema=None,
+optimizer=None, scheduler=None` in the `load_checkpoint()` call), then
+builds a brand new EMA, optimizer, and scheduler from the current
+config and starts `global_step` at 0 -- so the new loss function gets
+the config's actual `training.lr` (e.g. `0.0001`) and a full fresh
+cosine schedule, not the dead tail end of the old one. This is the
+Stage 1 "LR re-open" pattern applied to Stage 3. The normal
+`find_latest_checkpoint`-based resume path (used when
+`--warm_start_checkpoint` is not passed) is untouched.
+
+Two safety warnings were added because warm-start reuses the same
+checkpoint-loading code paths as normal training and can silently
+collide with them if pointed at old locations:
+- if `checkpoint.working_dir` already contains a checkpoint, a future
+  *plain* resume of that directory would find the OLD higher-step
+  checkpoint (with its dead LR) instead of the fresh warm-started run --
+  reviving the exact bug this flag exists to fix. Point
+  `checkpoint.working_dir` at a new directory for each warm-started run.
+- if `training.log_file` already exists, `init_log_file` will truncate
+  it (since `resuming = global_step > 0` is `False` on a warm start),
+  destroying the old run's log. Point `training.log_file` at a new path
+  too.
+
+Verified with a new test,
+`test_warm_start_checkpoint_resets_step_count_and_schedule`: trains a
+tiny 4-step checkpoint, warm-starts from it into a new checkpoint
+dir/log file with `loss_type=tversky` and `total_steps=3`, and asserts
+the run logs "Warm-started model weights from" (not "Resumed from
+checkpoint") and completes exactly 3 steps -- proving the step count
+and schedule really started fresh at 0, not continuing from step 4.
+Also manually smoke-tested pointing `--warm_start_checkpoint` at a
+checkpoint already living in the target `working_dir`/`log_file` and
+confirmed both collision warnings fire as expected. Full suite: 58/58
+passing.
+
+**Exact retrain command** (real Kaggle values -- edit
+`configs/stage3_ct_segmentation.yaml` first to point
+`checkpoint.working_dir` and `training.log_file` at NEW paths, e.g.
+`.../checkpoints/stage3_segmentation_focal_warmstart/` and
+`.../logs/stage3_focal_warmstart_log.csv`, then run):
+
+```bash
+python -m training.train_stage3_segmentation \
+  --config configs/stage3_ct_segmentation.yaml \
+  --warm_start_checkpoint /kaggle/working/checkpoints/stage3_segmentation/ckpt_step00020000.pt
+```
+
+**Not yet re-verified:** whether a fresh, full-LR schedule on top of the
+`focal` loss actually produces a stable, non-collapsing checkpoint on
+real BraTS-scale data -- that's the next real-GPU run's job. This fix
+only guarantees the new run actually gets a usable learning rate; it
+doesn't guarantee `focal` loss itself is the right choice (that
+question is still open pending this retrain's results).

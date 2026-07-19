@@ -316,6 +316,20 @@ def main():
                          help="Smoke-test override: run only this many steps instead of training.total_steps.")
     parser.add_argument("--max_patients", type=int, default=None,
                          help="Smoke-test override: use only this many discovered patients instead of data.max_patients.")
+    parser.add_argument("--warm_start_checkpoint", type=str, default=None,
+                         help="Load ONLY model weights from this exact checkpoint file, then start a "
+                              "completely FRESH optimizer/scheduler/EMA/step-count (step 0) using the "
+                              "current config's lr/warmup_steps/total_steps -- for switching loss_type "
+                              "(or any other training-dynamics change) partway through a run, where a "
+                              "normal resume would carry over the OLD optimizer momentum and a fully-"
+                              "decayed LR schedule, leaving the new loss no room to actually move the "
+                              "weights (found 2026-07-19 switching to Tversky/Focal mid-schedule).  "
+                              "Bypasses checkpoint.working_dir's normal auto-resume search entirely -- "
+                              "point checkpoint.working_dir at a NEW, different directory in the config "
+                              "for this run, so its checkpoints (step 0, 25, 50, ...) don't share a "
+                              "directory with the old run's (which reached step 20000+): otherwise a "
+                              "later plain resume would find the OLD run's higher step count and revive "
+                              "exactly the stale-LR problem this flag exists to avoid.")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -361,22 +375,53 @@ def main():
         optimizer,
         build_lr_lambda(train_cfg.get("warmup_steps", 0), train_cfg["total_steps"], train_cfg.get("lr_schedule", "cosine")),
     )
-    ema = EMA(model, decay=train_cfg.get("ema_decay", 0.999))
 
     amp_enabled = train_cfg.get("amp", True) and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
     ckpt_cfg = config["checkpoint"]
     search_dirs = [ckpt_cfg["working_dir"]] + list(ckpt_cfg.get("extra_resume_dirs", []))
-    latest_ckpt = find_latest_checkpoint(search_dirs)
 
     global_step = 0
-    if latest_ckpt is not None:
-        global_step, _extra = load_checkpoint(latest_ckpt, model, ema, optimizer, scheduler, map_location=device.type)
-        ema.decay = train_cfg.get("ema_decay", 0.999)  # re-apply from config on resume, same fix as Stage 1 -- see PROJECT_NOTES.md
-        log.info("Resumed from checkpoint %s at step %d", latest_ckpt, global_step)
+    if args.warm_start_checkpoint:
+        # Deliberately bypasses find_latest_checkpoint entirely: load ONLY the model's
+        # weights, then build EMA fresh (from those now-loaded weights, not stale
+        # random-init ones) -- optimizer and scheduler were already constructed fresh
+        # above and are left untouched. global_step stays 0: this is a new schedule,
+        # not a continuation of the old one's step count.
+        warm_step, _extra = load_checkpoint(args.warm_start_checkpoint, model, ema=None, optimizer=None, scheduler=None, map_location=device.type)
+        ema = EMA(model, decay=train_cfg.get("ema_decay", 0.999))
+        existing = find_latest_checkpoint(search_dirs)
+        if existing is not None:
+            log.warning(
+                "checkpoint.working_dir (%s) already has a checkpoint (%s) from a previous run -- "
+                "warm-starting into the SAME directory risks a future plain (non-warm-start) resume "
+                "finding that OLD, higher-step checkpoint instead of this fresh run's, reviving the "
+                "exact stale-LR problem --warm_start_checkpoint exists to avoid. Point "
+                "checkpoint.working_dir at a new directory for this run.",
+                ckpt_cfg["working_dir"], existing,
+            )
+        if os.path.exists(train_cfg["log_file"]):
+            log.warning(
+                "training.log_file (%s) already exists from a previous run -- since this is a fresh "
+                "(step 0) schedule, init_log_file below will TRUNCATE and overwrite it, destroying the "
+                "old run's log. Point training.log_file at a new path for this run if you want to keep it.",
+                train_cfg["log_file"],
+            )
+        log.info(
+            "Warm-started model weights from %s (was step %d there, now discarded) -- "
+            "optimizer, scheduler, EMA, and step count are all FRESH, starting at step 0 "
+            "with lr=%.6g.", args.warm_start_checkpoint, warm_step, train_cfg["lr"],
+        )
     else:
-        log.info("No checkpoint found in %s -- starting from scratch", search_dirs)
+        ema = EMA(model, decay=train_cfg.get("ema_decay", 0.999))
+        latest_ckpt = find_latest_checkpoint(search_dirs)
+        if latest_ckpt is not None:
+            global_step, _extra = load_checkpoint(latest_ckpt, model, ema, optimizer, scheduler, map_location=device.type)
+            ema.decay = train_cfg.get("ema_decay", 0.999)  # re-apply from config on resume, same fix as Stage 1 -- see PROJECT_NOTES.md
+            log.info("Resumed from checkpoint %s at step %d", latest_ckpt, global_step)
+        else:
+            log.info("No checkpoint found in %s -- starting from scratch", search_dirs)
 
     log_file = train_cfg["log_file"]
     init_log_file(log_file, resuming=global_step > 0)

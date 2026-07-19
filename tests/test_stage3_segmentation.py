@@ -324,3 +324,50 @@ def test_stage3_pipeline_trains_checkpoints_and_resumes(tmp_path):
     assert "Resumed from checkpoint" in result2.stderr
     assert "at step 4" in result2.stderr
     assert "Training complete: 6 steps." in result2.stderr
+
+
+@pytest.mark.slow
+def test_warm_start_checkpoint_resets_step_count_and_schedule(tmp_path):
+    """Real bug found 2026-07-19: switching training.loss_type on a normal
+    resume still carries over the OLD optimizer/scheduler state, including
+    a fully-decayed near-zero LR from the old run's cosine schedule -- the
+    new loss function then has no room to actually move the weights.
+    --warm_start_checkpoint must load ONLY model weights and start a
+    completely fresh step-0 schedule instead."""
+    root = tmp_path / "fake_synthetic_ct"
+    _write_fake_synthetic_ct(root, [f"P{i:03d}" for i in range(4)])
+    config = _base_config(tmp_path, root, patch_size=None)
+    config["training"]["total_steps"] = 4
+    cfg_path = tmp_path / "config.yaml"
+    with open(cfg_path, "w") as f:
+        yaml.safe_dump(config, f)
+
+    repo_root = str(Path(__file__).resolve().parents[1])
+    result1 = subprocess.run(
+        [sys.executable, "-m", "training.train_stage3_segmentation", "--config", str(cfg_path)],
+        cwd=repo_root, capture_output=True, text=True, timeout=120,
+    )
+    assert result1.returncode == 0, result1.stderr
+    old_checkpoint = tmp_path / "checkpoints" / "ckpt_step00000004.pt"
+    assert old_checkpoint.exists()
+
+    # Fresh checkpoint dir + log file (as the tool's own warning recommends), different loss_type
+    config["checkpoint"]["working_dir"] = str(tmp_path / "checkpoints_v2")
+    config["training"]["log_file"] = str(tmp_path / "logs" / "regression_log_v2.csv")
+    config["training"]["loss_type"] = "tversky"
+    config["training"]["total_steps"] = 3
+    cfg_path2 = tmp_path / "config_v2.yaml"
+    with open(cfg_path2, "w") as f:
+        yaml.safe_dump(config, f)
+
+    result2 = subprocess.run(
+        [sys.executable, "-m", "training.train_stage3_segmentation", "--config", str(cfg_path2),
+         "--warm_start_checkpoint", str(old_checkpoint)],
+        cwd=repo_root, capture_output=True, text=True, timeout=120,
+    )
+    assert result2.returncode == 0, result2.stderr
+    assert "Warm-started model weights from" in result2.stderr
+    assert "Resumed from checkpoint" not in result2.stderr
+    # total_steps=3 in the new config -- only reachable if global_step actually started at 0,
+    # not continued from the old run's step 4.
+    assert "Training complete: 3 steps." in result2.stderr
