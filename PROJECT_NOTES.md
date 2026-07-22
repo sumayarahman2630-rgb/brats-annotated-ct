@@ -1423,3 +1423,82 @@ a fair gamma comparison going forward requires either (a) both variants
 warm-started from the same source checkpoint, or (b) both from scratch
 -- never one of each. Neither option is available retroactively for
 v3 vs this run, since both of v3's relevant checkpoints are gone.
+
+### Follow-up: real loss=nan hit at step ~8000 -- fp32 loss fix + non-finite guard added
+
+That same scratch run (gamma=1.0) hit a separate, more serious problem
+around step 8000: `loss=nan` in the log, persisting on every subsequent
+logged step (8000 through at least 8225) with no recovery. Val dice
+still reported small numbers (0.2000, 0.2500, 0.0001) -- consistent with
+training having effectively FROZEN rather than continuing to train on
+garbage: `GradScaler` correctly refuses to call `optimizer.step()` when
+gradients are non-finite (it silently skips and just shrinks its scale
+factor), so the weights likely weren't corrupted -- but nothing in the
+loop said so, and it would have kept "training" (producing the identical
+frozen log line) for the rest of the 20000 steps undetected.
+
+**Root cause found and fixed:** `combined_loss` was called inside the
+main training loop's `autocast_ctx()` block WITHOUT a `.float()` cast on
+`logits`/`mask` -- `quick_validation` already does
+`combined_loss(logits.float(), mask.float(), **loss_kwargs)`, but the
+main loop's equivalent call was missing that cast, leaving the loss's
+own internal reductions (dice/tversky's `.sum(dim=1)` over a whole
+96x96x64 patch, focal's `.mean()` over the full batch) computed in fp16
+under autocast, where plain elementwise/reduction ops (unlike
+`binary_cross_entropy_with_logits`, which autocast forces to fp32
+automatically) are not on autocast's forced-fp32 op list. Fixed in
+`training/train_stage3_segmentation.py`'s main training loop: now calls
+`combined_loss(logits.float(), mask.float(), **loss_kwargs)`, matching
+`quick_validation`'s already-correct pattern -- this removes a real,
+if hard-to-conclusively-confirm-as-root-cause, inconsistency between the
+two call sites.
+
+**Honesty check on that root cause:** attempted to reproduce fp16
+reduction overflow directly (constructing large synthetic tensors,
+casting to `torch.float16`, running the same reduction chain as
+`focal_loss_with_logits`) and could NOT reproduce an overflow -- even
+with a true pre-division sum well beyond fp16's ~65504 max (verified up
+to ~2.45 million), PyTorch's `.mean()`/`.sum()` on a half-precision
+tensor evidently accumulates internally at higher precision, so this
+specific overflow mechanism is NOT confirmed as the actual trigger.
+Also checked whether a NaN in the input CT data itself (a corrupted
+Stage 2 output) could be the cause; found, while trying to build a test
+for it, that SimpleITK's own NIfTI writer silently sanitizes NaN to 0.0
+on write (verified directly: writing an array containing NaN via
+`sitk.WriteImage` and reading it back gives 0.0, not NaN) -- meaning a
+genuine NaN in Stage 2's in-memory output would likely never survive
+being saved to disk, making "corrupted Stage 2 file" a less likely
+explanation than it first seemed. **The true trigger for this specific
+NaN is not conclusively identified.** The fp32 cast is kept regardless,
+since it removes a real inconsistency and is objectively correct
+practice (computing a loss's reductions in fp32 even under an autocast
+forward pass, exactly why `quick_validation` was already written that
+way) -- it just isn't proven to be the one fix that would have
+prevented this exact occurrence.
+
+**Defensive addition (independent of root cause):** the training loop
+now has an explicit `if not torch.isfinite(loss): log.warning(...);
+continue` guard, logging the step number and the batch's `patient_id`
+before skipping (not even running `backward()`), rather than relying on
+`GradScaler`'s silent skip. If this recurs, the log will now say so
+immediately and name the patient involved, rather than requiring someone
+to notice a suspiciously-flat dice trend after the fact. Also means
+`scheduler.step()`/`ema.update()`/`global_step` no longer advance on a
+skipped step -- a step that produced no real gradient information no
+longer consumes schedule budget.
+
+Verified with a new unit test,
+`test_combined_loss_is_non_finite_when_logits_contain_nan`: constructs
+logits with a NaN in one voxel and confirms every `loss_type` branch
+(`dice_bce`, `tversky`, `focal_tversky`, `focal`) produces a non-finite
+result, confirming the training loop's `torch.isfinite(loss)` guard
+would actually catch a NaN reaching `combined_loss` regardless of its
+source. Did not attempt a full end-to-end repro of the original failure
+(the SimpleITK NaN-sanitization finding above made the natural injection
+route unreliable) -- Full suite: 59/59 passing.
+
+**Not yet verified:** whether NaN recurs on the next real Kaggle run
+now that the fp32 cast is in place, and whether the true trigger was
+something this investigation didn't reach (e.g. a genuine activation
+explosion inside the model itself, unrelated to the loss function) --
+if it recurs, the new warning's patient_id will be the fastest lead.

@@ -445,7 +445,40 @@ def main():
         optimizer.zero_grad(set_to_none=True)
         with autocast_ctx():
             logits = model(ct)
-            loss = combined_loss(logits, mask, **loss_kwargs)
+            # combined_loss's own reductions (dice/tversky's .sum(dim=1) over
+            # a whole 96x96x64 patch, focal's .mean() over the full batch)
+            # are plain elementwise/reduction ops, not on autocast's forced-
+            # fp32 op list -- left in fp16 under autocast, their running sum
+            # over hundreds of thousands of voxels can silently exceed fp16's
+            # ~65504 max and overflow to inf/nan, independent of (and NOT
+            # caught by) GradScaler, which only guards the backward/gradient
+            # stage. Found 2026-07-22: a real run hit loss=nan at step ~8000
+            # and stayed nan every step after -- GradScaler correctly skipped
+            # every subsequent optimizer.step() once that started (protecting
+            # the weights, but freezing training silently). Fix: compute the
+            # loss itself in float32, matching quick_validation's existing
+            # (already-correct) combined_loss(logits.float(), mask.float(), ...)
+            # call above -- this was the one place still missing that cast.
+            loss = combined_loss(logits.float(), mask.float(), **loss_kwargs)
+
+        if not torch.isfinite(loss):
+            # GradScaler already refuses to apply a non-finite gradient (it
+            # would silently skip scaler.step() below and just shrink its
+            # scale factor), so weights can't actually get corrupted by
+            # this -- but without this check, a persistently non-finite loss
+            # (e.g. the fp16-overflow bug above, or any future numerical
+            # edge case) logs "loss=nan" every step forever with no
+            # indication training has effectively frozen, exactly what
+            # happened in the real run that surfaced this 2026-07-22.
+            # Skip the step entirely (don't even spend a wasted backward())
+            # rather than relying on that silent skip.
+            log.warning(
+                "step %d: non-finite loss (%s) on patient(s) %s -- skipping this step, weights left unchanged. "
+                "If this recurs, inspect that patient's synthetic_ct.nii(.gz)/tumor_mask.nii(.gz) directly for a "
+                "NaN/Inf voxel (a bad Stage 2 output would explain a persistently-triggering patient).",
+                global_step, loss.item(), batch["patient_id"],
+            )
+            continue
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)

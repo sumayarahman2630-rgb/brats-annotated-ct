@@ -371,3 +371,40 @@ def test_warm_start_checkpoint_resets_step_count_and_schedule(tmp_path):
     # total_steps=3 in the new config -- only reachable if global_step actually started at 0,
     # not continued from the old run's step 4.
     assert "Training complete: 3 steps." in result2.stderr
+
+
+def test_combined_loss_is_non_finite_when_logits_contain_nan():
+    """Real bug found 2026-07-22: a real Kaggle run hit loss=nan around
+    step 8000 and every logged step after that stayed nan too -- training
+    had effectively frozen (GradScaler was silently skipping every
+    optimizer.step() once gradients went non-finite) while the log kept
+    scrolling as if it were still running. The fix added an explicit
+    `if not torch.isfinite(loss): ... continue` guard in the training loop
+    so this is now visible and non-fatal instead of silently freezing.
+    Attempting to reproduce the exact trigger end-to-end (e.g. writing a
+    NaN into a patient's synthetic_ct.nii, mimicking a corrupted Stage 2
+    output) turned up something worth noting instead: SimpleITK's own NIfTI
+    writer silently sanitizes NaN to 0.0 on write (verified directly -- a
+    NaN written via sitk.WriteImage reads back as 0.0), meaning a genuine
+    NaN in Stage 2's in-memory output would likely never survive being
+    saved to disk in the first place -- making a corrupted Stage 2 file a
+    less likely root cause than originally suspected. What this test
+    verifies instead, directly at the loss-function level: IF a NaN does
+    reach combined_loss's logits (regardless of source -- corrupted data
+    that bypasses the file layer, an activation explosion inside the model
+    itself, etc.), every loss_type correctly produces a non-finite result,
+    confirming the training loop's `torch.isfinite(loss)` guard would
+    actually catch it."""
+    logits = torch.randn(1, 1, 6, 6, 6)
+    logits[0, 0, 2, 2, 2] = float("nan")
+    target = torch.zeros(1, 1, 6, 6, 6)
+    target[0, 0, 2:4, 2:4, 2:4] = 1.0
+
+    for loss_type, kwargs in [
+        ("dice_bce", {}),
+        ("tversky", {}),
+        ("focal_tversky", {}),
+        ("focal", {}),
+    ]:
+        loss = combined_loss(logits, target, bce_weight=1.0, loss_type=loss_type, **kwargs)
+        assert not torch.isfinite(loss), f"expected non-finite loss for loss_type={loss_type!r}, got {loss.item()}"
