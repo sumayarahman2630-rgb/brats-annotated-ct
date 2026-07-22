@@ -1317,3 +1317,63 @@ Reuse the same warm-started checkpoint (no need to redo the LR reset,
 only the loss weighting changed) into a NEW `checkpoint.working_dir` /
 `training.log_file` pair, per the same collision-avoidance rule as the
 warm-start fix above.
+
+### Follow-up: focal_alpha fix ran, but plateaued -- gamma lowered, LR bumped
+
+The retrain with `focal_alpha=0.75` did run, but the Kaggle session
+closed before "Save Version," losing the checkpoint. Its val dice trend
+was recorded before it was lost: step 10000=0.33, 11000=0.31,
+20000=0.33 -- flat for the entire second half of the schedule, no
+further improvement.
+
+Checked the actual LR trajectory for this schedule (warmup_steps=200,
+total_steps=20000, cosine, peak lr=0.0002) before proposing anything:
+lr at step 10000 is ~0.000102 (about half of peak), at step 15000
+~0.00003, only collapsing to near-zero (~1e-6) by step 19000. Since
+dice was ALREADY flat at step 10000 while lr was still a meaningful
+fraction of peak, "the LR schedule decayed away too fast" does not
+explain why the plateau STARTED -- it only explains why the model
+can't recover in the final ~3000 steps. This rules out schedule timing
+as the primary cause and points at the loss shape instead.
+
+**Fix, config-only, `configs/stage3_ct_segmentation.yaml`:**
+- `focal_gamma: 2.0 -> 1.0` (primary lever). `focal_alpha=0.75` already
+  corrects the class-weight direction (previous section); gamma's only
+  remaining job is down-weighting gradient on already-confident voxels.
+  At gamma=2.0, `(1-p_t)^2` also strongly suppresses voxels that are
+  partially right but still below the 0.5 threshold (p_t roughly
+  0.3-0.6) -- exactly the gradient needed to push tumor predictions
+  past threshold. Lowering (not eliminating) gamma keeps some hard-
+  example focusing while discarding less of that gradient.
+- `lr: 0.0002 -> 0.0003` (secondary, modest). Not the primary fix per
+  the trajectory analysis above, but a small peak-LR increase is a
+  cheap complement in case the model is stuck in a genuinely flat
+  region. Deliberately not doubled, and `warmup_steps` (200) left
+  unchanged -- nothing in the evidence implicates the warmup phase, and
+  changing multiple things at once would make the next run's result
+  impossible to attribute.
+- `loss_type` default in the config changed from `tversky` to `focal`
+  to match what's actually being trained on Kaggle -- not a claim that
+  focal outperformed tversky (tversky/focal_tversky remain fully
+  supported, untested-on-real-data fallbacks if focal plateaus again).
+- `total_steps` deliberately left at 20000, NOT increased. Dice was
+  already flat at step 10000 -- half the schedule -- while lr was still
+  meaningfully large; spending more steps against the same loss shape
+  is unlikely to produce new movement. If the gamma=1.0 run is still
+  visibly rising at step 20000 (not flat), extending steps for a LATER
+  run would be justified then, on evidence -- not preemptively now.
+
+Since the checkpoint was lost, this retrain starts from scratch (no
+`--warm_start_checkpoint`), which is also why gamma/lr can both be
+tuned before this run without any of the warm-start collision
+constraints applying.
+
+**Not yet verified:** whether gamma=1.0 actually breaks the plateau on
+real data -- this is still a hypothesis (well-evidenced by the LR
+trajectory ruling out the schedule, but not yet confirmed by a rerun).
+If dice plateaus again at a similar value with gamma=1.0, the next
+honest hypothesis is a representational ceiling (model capacity --
+`base_channels=32` is small -- or the foreground-biased crop not
+providing enough signal on harder cases) rather than another loss
+hyperparameter, and would call for an architecture/data investigation
+rather than further loss tuning.

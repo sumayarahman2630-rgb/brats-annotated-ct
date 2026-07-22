@@ -42,7 +42,8 @@ model:
 
 training:
   batch_size: 2
-  lr: 0.0002
+  lr: 0.0003                            # bumped from 0.0002 2026-07-19 -- secondary lever alongside the
+                                         # focal_gamma change below, see PROJECT_NOTES.md's plateau follow-up
   weight_decay: 0.0
   lr_schedule: "cosine"
   warmup_steps: 200
@@ -50,15 +51,29 @@ training:
   # Real Kaggle run (2026-07-19, 20000 steps) confirmed Dice+BCE ("dice_bce", the
   # original default) collapses toward predicting an essentially empty mask under
   # this project's severe class imbalance -- external Jordan validation came back
-  # ~0.0005-0.013 Dice, uniformly near-zero. Switched the default here to "tversky"
-  # (beta > alpha deliberately penalizes missed tumor more than false alarms, the
-  # standard fix for exactly this collapse-to-empty failure mode). See
+  # ~0.0005-0.013 Dice, uniformly near-zero. "tversky" and "focal" were both added
+  # as fixes; the real training since has been running "focal" (with focal_alpha
+  # corrected below), which is why the default here now matches that, not because
+  # tversky performed worse -- tversky/focal_tversky are still fully supported,
+  # untested-on-real-data alternatives if focal also plateaus. See
   # PROJECT_NOTES.md's Stage 3 investigation section for the full evidence.
-  loss_type: "tversky"                  # dice_bce | tversky | focal_tversky | focal
+  loss_type: "focal"                     # dice_bce | tversky | focal_tversky | focal
   bce_weight: 1.0                       # only used when loss_type: dice_bce
   tversky_alpha: 0.3                    # false-positive weight (used by tversky / focal_tversky)
   tversky_beta: 0.7                     # false-negative weight -- higher than alpha, penalizes missed tumor more
-  focal_gamma: 2.0                      # only used when loss_type: focal
+  focal_gamma: 1.0                      # only used when loss_type: focal -- lowered from 2.0 2026-07-19 after a
+                                         # real run (focal_alpha=0.75, gamma=2.0) plateaued at val dice~=0.33 from
+                                         # step 10000 through 20000 with NO further movement, even while lr was
+                                         # still ~half of peak (cosine schedule) -- ruling out "LR already decayed
+                                         # away" as the plateau's cause. With alpha already correcting the class
+                                         # weight, gamma's only remaining job is suppressing gradient on already-
+                                         # confident voxels; at gamma=2.0, (1-p_t)^2 also strongly suppresses
+                                         # partially-right-but-still-below-threshold tumor voxels (p_t in roughly
+                                         # 0.3-0.6), which is exactly the gradient needed to push them past the
+                                         # 0.5 threshold. gamma=1.0 keeps some hard-example focusing without
+                                         # discarding as much of that gradient. See PROJECT_NOTES.md's plateau
+                                         # follow-up for the full reasoning and the LR trajectory that ruled out
+                                         # the schedule itself as the primary cause.
   focal_alpha: 0.75                     # only used when loss_type: focal -- weights the RARE class (tumor,
                                          # target=1) via alpha_t=alpha*target+(1-alpha)*(1-target); 0.25 (the
                                          # RetinaNet-anchor-tuned default) gives tumor LESS weight than background,
