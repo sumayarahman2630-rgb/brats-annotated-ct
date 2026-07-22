@@ -1377,3 +1377,49 @@ honest hypothesis is a representational ceiling (model capacity --
 providing enough signal on harder cases) rather than another loss
 hyperparameter, and would call for an architecture/data investigation
 rather than further loss tuning.
+
+### Follow-up: gamma=1.0 vs gamma=2.0 comparison is confounded, not yet conclusive
+
+The gamma=1.0 retrain (previous section) showed the same broken 0.0000/
+0.5000-only dice pattern through step 2250 that v3 (gamma=2.0) did NOT
+show at a comparable point (v3's dice there was reported as continuous,
+0.16-0.65). The instinct was to read this as "gamma=1.0 disproven,
+revert to 2.0" -- but that comparison has a confound that makes the
+conclusion unsafe to draw yet.
+
+**The confound:** v3 (gamma=2.0) was warm-started (`--warm_start_checkpoint`)
+from the original 20000-step Dice+BCE checkpoint -- its *head* had
+collapsed to predicting empty masks, but its encoder already carried
+~20000 steps of learned anatomical features. The gamma=1.0 run is
+trained from complete scratch (random init), because that original
+checkpoint was lost along with v3's own checkpoint (confirmed -- neither
+survives anywhere on Kaggle as of this note). Two things changed at
+once between the two runs (gamma AND the starting point), and at step
+2250 (barely past the 200-step warmup) a randomly-initialized 3D U-Net
+is expected to still look undertrained regardless of which gamma it
+uses -- the same 0.0000/0.5000 dice-formula artifact from two sections
+up (P~=0, tiny/moderate T) is exactly what "hasn't learned much yet"
+looks like under this metric. So this data point cannot currently
+distinguish "gamma=1.0 is worse" from "cold start takes longer to warm
+up than a pretrained-encoder resume" -- and since both the source
+checkpoint v3 warm-started from AND v3's own checkpoint are gone, this
+specific v3-vs-v4 comparison can never be made fair after the fact.
+
+**Decision (2026-07-19):** do NOT revert gamma yet. Config stays at
+`focal_gamma: 1.0`, `focal_alpha: 0.75`, `lr: 0.0003` -- the same
+in-progress scratch run continues rather than restarting again on an
+unconfirmed hypothesis. Watch the dice curve at step ~5000-8000: if it
+transitions from the discrete 0.0/0.5 artifact pattern to a continuous
+spread (as v3 apparently showed by a comparable point, even though that
+point isn't directly comparable given the confound), that's consistent
+with ordinary cold-start catch-up and gamma=1.0 remains the working
+hypothesis. If it's still stuck in the discrete pattern by ~8000-10000
+steps with no transition, that's a real signal against gamma=1.0 on its
+own footing (a from-scratch run, judged against itself, not against
+v3's warm-started trajectory).
+
+Noting this as the honest-research-practice point the confound raises:
+a fair gamma comparison going forward requires either (a) both variants
+warm-started from the same source checkpoint, or (b) both from scratch
+-- never one of each. Neither option is available retroactively for
+v3 vs this run, since both of v3's relevant checkpoints are gone.
