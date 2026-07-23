@@ -111,6 +111,11 @@ python -m training.train_stage3_segmentation --config configs/stage3_ct_segmenta
 python -m inference.validate_jordan_segmentation --config configs/stage3_ct_segmentation.yaml
 ```
 
+**7. Visualize Stage 3 predictions** (per-patient CT / real mask / predicted mask panels, on both the synthetic validation split and Jordan):
+```bash
+python -m inference.visualize_predictions --config configs/stage3_ct_segmentation.yaml --source both --num_patients 5
+```
+
 Run the test suite (CPU-only, no GPU/real data needed):
 ```bash
 pip install -r requirements.txt
@@ -132,6 +137,7 @@ training/ema.py                       shared exponential moving average
 inference/visualize_regression_val.py Stage 1 validation: PSNR/SSIM + comparison images
 inference/run_stage2_brats_regression.py   Stage 2: generate the BraTS synthetic-CT dataset
 inference/validate_jordan_segmentation.py  Stage 3 external validation against real Jordan CT
+inference/visualize_predictions.py    Stage 3 per-patient prediction visualization (CT/real mask/predicted mask), both synthetic val + Jordan
 data/preprocessing.py                 shared HU/MRI normalization, resample, brain-mask, crop/pad, foreground-biased patch crop
 data/loaders_synthrad.py              SynthRAD2023 dataset (Stage 1 training data)
 data/loaders_brats.py                 BraTS2020 dataset (Stage 2 input data)

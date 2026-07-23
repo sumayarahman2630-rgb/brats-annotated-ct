@@ -1591,3 +1591,67 @@ hypothesis is something structural in the model itself (an
 under-normalized layer, or the architecture being generally prone to
 activation blow-up under this data), not another loss/optimizer
 hyperparameter.
+
+### Added: inference/visualize_predictions.py -- reusable per-patient prediction visualization
+
+Manually running a checkpoint on a full volume (`model(ct)` directly,
+not through `predict_full_volume`) crashes with a `torch.cat` skip-
+connection shape mismatch (`Expected size 40 but got size 39`) unless the
+volume's spatial dims happen to already be exact multiples of
+`2**(num_levels-1)` -- full brain-crop volumes essentially never are.
+`predict_full_volume` (added earlier, see the Gaussian-blending section
+above) is NOT subject to this: it pads every individual tile up to the
+exact trained `patch_size` (itself validated as divisible by that factor,
+with a clear `ValueError` if not) before each `forward()` call, so the
+model only ever sees correctly-shaped input regardless of the source
+volume's actual dimensions. Confirmed by reading the function directly,
+not just by assertion.
+
+New script, `inference/visualize_predictions.py`, gives a reusable,
+per-patient version of the one-off example `validate_jordan_segmentation.py`'s
+`save_visualization` already produced (that function stays as-is, still
+used for its own single side-by-side comparison image -- this is a
+separate, dedicated tool for visualizing many patients across both
+sources, not a replacement).
+
+- **Synthetic source**: reuses `build_synthetic_ct_dataloaders` (the
+  exact same val split/seed training itself used), full-volume sliding-
+  window inference via `predict_full_volume`, real tumor mask available
+  for comparison.
+- **Jordan source**: reuses the pseudo-3D slice-replication workaround
+  (`_build_pseudo_volume`, duplicated locally rather than imported from
+  `validate_jordan_segmentation.py` -- tiny, 4-line, Jordan-specific
+  helper, kept this script self-contained) -- see
+  `data/loaders_jordan_ct.py`'s module docstring for why this is a
+  workaround, not genuine 3D context.
+- Both sources render through the same `save_panel()`: CT / CT+real-mask
+  overlay / CT+predicted-mask overlay, one PNG per patient (synthetic) or
+  per matched slice (Jordan).
+- Slice selection for the synthetic source picks the Z slice with the
+  MOST true-tumor pixels (`_best_slice_index`), not the geometric mid-
+  slice `validate_jordan_segmentation.py`'s example row uses -- a full
+  volume's middle slice very often shows zero tumor for a small lesion,
+  which would visualize nothing informative. Falls back to the volume's
+  mid-slice if a patient genuinely has no tumor anywhere.
+
+Verified CPU-only: `_best_slice_index` and `_build_pseudo_volume` unit-
+tested directly (correct slice picked, correct fallback, correct
+replication/padding/center-index math), plus a full subprocess end-to-end
+test -- fake synthetic CT patients, fake Jordan RGB DICOM slices, and a
+freshly-initialized (untrained) checkpoint, confirming the whole pipeline
+runs without error and saves the expected image count per source. Full
+suite: 63/63 passing.
+
+**Not yet verified:** actual output quality/correctness on a real
+checkpoint and real data (only checked that the pipeline runs and
+produces the right number of files, not that the images look right) --
+that's the Kaggle smoke test's job.
+
+**Kaggle smoke-test command** (few patients, fast, both sources):
+```bash
+python -m inference.visualize_predictions --config configs/stage3_ct_segmentation.yaml --source both --num_patients 3
+```
+Full run (default 5 patients/slices per source):
+```bash
+python -m inference.visualize_predictions --config configs/stage3_ct_segmentation.yaml
+```
