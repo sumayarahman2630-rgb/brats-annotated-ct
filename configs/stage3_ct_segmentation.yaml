@@ -53,7 +53,11 @@ training:
                                          # that builds up over time rather than appearing immediately
   lr_schedule: "cosine"
   warmup_steps: 200
-  total_steps: 20000
+  total_steps: 30000                    # extended from 20000 2026-07-23 -- unlike every prior plateau in this
+                                         # file, the completed 20000-step run's val dice was still generally
+                                         # rising (noisy, but ~0.20 early -> ~0.31 by the end, not flat), so more
+                                         # steps is a reasonable lever this time, not a blind retry of something
+                                         # already proven not to help
   # Real Kaggle run (2026-07-19, 20000 steps) confirmed Dice+BCE ("dice_bce", the
   # original default) collapses toward predicting an essentially empty mask under
   # this project's severe class imbalance -- external Jordan validation came back
@@ -78,13 +82,22 @@ training:
                                          # track record, restarting for the nan issue regardless) rather than a
                                          # rigorously confirmed one -- see PROJECT_NOTES.md's stability follow-up
                                          # for the full, honest reasoning.
-  focal_alpha: 0.75                     # only used when loss_type: focal -- weights the RARE class (tumor,
+  focal_alpha: 0.6                      # only used when loss_type: focal -- weights the RARE class (tumor,
                                          # target=1) via alpha_t=alpha*target+(1-alpha)*(1-target); 0.25 (the
-                                         # RetinaNet-anchor-tuned default) gives tumor LESS weight than background,
-                                         # backwards for our extreme foreground rarity -- flipped 2026-07-19 after
-                                         # dice got stuck oscillating between two smooth=1.0 dice-formula artifacts
-                                         # (0.0000/0.5000), which traced back to predictions never crossing the 0.5
-                                         # threshold on tumor voxels at all under the old alpha
+                                         # RetinaNet-anchor-tuned default) gave tumor LESS weight than background,
+                                         # backwards for our extreme foreground rarity -- flipped to 0.75 on
+                                         # 2026-07-19 after dice got stuck oscillating between two smooth=1.0
+                                         # dice-formula artifacts (0.0000/0.5000), traced back to predictions
+                                         # never crossing the 0.5 threshold on tumor voxels at all under 0.25.
+                                         # Lowered from 0.75 to 0.6 on 2026-07-23: the completed 20000-step run at
+                                         # 0.75 stopped collapsing to empty (good) but visibly over-corrected the
+                                         # other way -- inference/visualize_predictions.py on a real checkpoint
+                                         # showed the predicted mask covering a much larger area than the real
+                                         # tumor (over-segmentation, false positives), consistent with 0.75
+                                         # weighting "miss a tumor voxel" 3x worse than "falsely predict tumor" --
+                                         # too aggressive now that the original collapse-to-empty problem is
+                                         # solved. 0.6 still favors the rare class over background (unlike the
+                                         # original 0.25), just less extremely.
   amp: true
   grad_clip_norm: 1.0
   ema_decay: 0.999                      # EMA state saved for reference only -- inference/validate_jordan_segmentation.py always evaluates RAW weights, same anti-contamination pattern as Stage 1

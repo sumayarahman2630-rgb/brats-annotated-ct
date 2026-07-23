@@ -1655,3 +1655,69 @@ Full run (default 5 patients/slices per source):
 ```bash
 python -m inference.visualize_predictions --config configs/stage3_ct_segmentation.yaml
 ```
+
+### Follow-up: first complete 20000-step run -- real progress, over-segmentation found
+
+The gamma=2.0/lr=0.0002/weight_decay=0.00001 config (previous section)
+completed a full 20000-step run without derailing. Its periodic
+`quick_validation` dice (patch-level, center-cropped, NOT full-volume --
+see the caveat below) trended from ~0.20 at step 1000 up to ~0.31 by
+step 20000, noisily but genuinely rising across the run (max 0.3196 at
+step 16000, not a flat plateau like every prior attempt in this file).
+Real, if modest, progress.
+
+`inference/visualize_predictions.py` run on this checkpoint (real
+Kaggle images, not synthetic test fixtures) surfaced something the dice
+number alone didn't show: on the synthetic (in-distribution) example,
+the predicted mask covers a visibly LARGER area than the real tumor --
+over-segmentation, not under-segmentation. This is consistent with
+`focal_alpha=0.75` (previous section's fix, weighting a missed tumor
+voxel 3x worse than a false alarm) having successfully solved the
+original collapse-to-empty problem but overshot the correction: the
+model now errs toward predicting tumor too liberally rather than not at
+all.
+
+**Fix, config-only, `configs/stage3_ct_segmentation.yaml`:**
+- `focal_alpha: 0.75 -> 0.6` -- still favors the rare tumor class over
+  background (unlike the original, wrong-direction 0.25), just less
+  extremely. A moderate step back toward balance rather than reverting
+  all the way, since the collapse-to-empty problem it was fixing is real
+  and shouldn't be reintroduced.
+- `total_steps: 20000 -> 30000` -- unlike every prior plateau in this
+  file, this run's dice was still generally rising at the end, not flat,
+  so more steps is a reasonable lever here specifically (not a blind
+  repeat of something already shown not to help).
+
+**Important measurement caveat, raised to the user directly:** the
+20000-step run's reported dice trend comes from `quick_validation`'s
+periodic check, which center-crops each val volume at its GEOMETRIC
+center (not tumor-centered) -- a cheap, deliberately approximate
+in-training sanity signal (see this file's much earlier note on it being
+frozen at exactly 0.2000 under worse conditions), not a trustworthy
+final quality number. There is currently no dedicated script computing
+real full-volume Dice across the whole synthetic validation set (only
+`inference/visualize_predictions.py`'s few-patient qualitative check and
+`inference/validate_jordan_segmentation.py`'s Jordan-only quantitative
+metrics exist). Chasing a specific target (the user asked for ~0.6)
+against the periodic patch-check number risks optimizing the wrong
+metric -- flagged as a real gap, not yet addressed.
+
+**Recommended before spending more GPU-hours, zero-cost:** re-run
+`inference/visualize_predictions.py --threshold 0.6` (or 0.7) on the
+EXISTING checkpoint before retraining at all, to check whether the
+over-segmentation is primarily a threshold-calibration issue (tightens
+with a higher cutoff, no retrain needed) or a genuine learning issue
+(stays oversized regardless of threshold) -- this was suggested to the
+user but not yet confirmed either way.
+
+**Not yet verified:** whether focal_alpha=0.6 actually reduces
+over-segmentation without reintroducing the collapse-to-empty problem
+from the other direction, whether the extra 10000 steps meaningfully
+raise dice or mostly plateau, and whether ~0.6 dice is realistically
+reachable at all given other structural limits not yet touched (a
+32-base-channel model, no data augmentation, and a synthetic -- not
+real -- CT as the segmentation input, which caps achievable precision
+regardless of Stage 3 tuning). Told to the user directly: 0.6 from a
+current best of ~0.32 is a large jump, more likely to need several
+iterations (and possibly a full-volume validation script to measure
+against) than one config change.
