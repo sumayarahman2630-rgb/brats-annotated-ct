@@ -485,6 +485,21 @@ def main():
         torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.get("grad_clip_norm", 1.0))
         scaler.step(optimizer)
         scaler.update()
+
+        # Belt-and-suspenders check added 2026-07-22 alongside the non-finite-loss guard above: GradScaler.step()
+        # already refuses to apply a non-finite gradient, so the parameters below should never actually go
+        # non-finite -- if this ever fires, GradScaler's own protection failed somehow, which is a much more
+        # serious problem than a single bad batch and not something a skip-and-continue can recover from (the
+        # weights are already corrupted at that point). Hard-stop rather than silently training garbage for the
+        # rest of the run.
+        for p in model.parameters():
+            if not torch.isfinite(p).all():
+                raise RuntimeError(
+                    f"step {global_step}: model parameters are non-finite despite GradScaler's protection -- "
+                    "this should not be possible and indicates a bug beyond the loss-level non-finite guard. "
+                    "Stopping rather than continuing to train a corrupted model."
+                )
+
         scheduler.step()
         ema.update(model)
 

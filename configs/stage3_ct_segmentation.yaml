@@ -42,9 +42,15 @@ model:
 
 training:
   batch_size: 2
-  lr: 0.0003                            # bumped from 0.0002 2026-07-19 -- secondary lever alongside the
-                                         # focal_gamma change below, see PROJECT_NOTES.md's plateau follow-up
-  weight_decay: 0.0
+  lr: 0.0002                            # reverted from the 0.0003 bump 2026-07-22 -- that bump was introduced
+                                         # alongside focal_gamma=1.0 for the plateau (see below); both are being
+                                         # reverted together after a real run showed escalating loss=nan
+                                         # frequency (step ~4788 onward), see PROJECT_NOTES.md's stability follow-up
+  weight_decay: 0.00001                 # added 2026-07-22, alongside the nan-frequency investigation -- was 0.0
+                                         # (no regularization at all) for every prior Stage 3 run; a small L2 term
+                                         # gives long training runs something to keep weight/activation magnitude
+                                         # bounded over thousands of steps, a plausible contributor to instability
+                                         # that builds up over time rather than appearing immediately
   lr_schedule: "cosine"
   warmup_steps: 200
   total_steps: 20000
@@ -61,19 +67,17 @@ training:
   bce_weight: 1.0                       # only used when loss_type: dice_bce
   tversky_alpha: 0.3                    # false-positive weight (used by tversky / focal_tversky)
   tversky_beta: 0.7                     # false-negative weight -- higher than alpha, penalizes missed tumor more
-  focal_gamma: 1.0                      # only used when loss_type: focal -- lowered from 2.0 2026-07-19 after a
-                                         # real run (focal_alpha=0.75, gamma=2.0) plateaued at val dice~=0.33 from
-                                         # step 10000 through 20000 with NO further movement, even while lr was
-                                         # still ~half of peak (cosine schedule) -- ruling out "LR already decayed
-                                         # away" as the plateau's cause. With alpha already correcting the class
-                                         # weight, gamma's only remaining job is suppressing gradient on already-
-                                         # confident voxels; at gamma=2.0, (1-p_t)^2 also strongly suppresses
-                                         # partially-right-but-still-below-threshold tumor voxels (p_t in roughly
-                                         # 0.3-0.6), which is exactly the gradient needed to push them past the
-                                         # 0.5 threshold. gamma=1.0 keeps some hard-example focusing without
-                                         # discarding as much of that gradient. See PROJECT_NOTES.md's plateau
-                                         # follow-up for the full reasoning and the LR trajectory that ruled out
-                                         # the schedule itself as the primary cause.
+  focal_gamma: 2.0                      # reverted back to 2.0 2026-07-22. Was lowered to 1.0 on 2026-07-19 to
+                                         # address a val-dice plateau (see PROJECT_NOTES.md's plateau follow-up),
+                                         # but the gamma=1.0 scratch run never showed a clean transition to a
+                                         # continuous, improving dice/loss trend through step 6557 either, AND
+                                         # separately hit escalating loss=nan from step ~4788 onward -- since an
+                                         # increasing fraction of steps in that window were skipped (no weight
+                                         # update at all), this run doesn't cleanly isolate gamma's effect on its
+                                         # own; reverting is a pragmatic choice (nearest configuration with any
+                                         # track record, restarting for the nan issue regardless) rather than a
+                                         # rigorously confirmed one -- see PROJECT_NOTES.md's stability follow-up
+                                         # for the full, honest reasoning.
   focal_alpha: 0.75                     # only used when loss_type: focal -- weights the RARE class (tumor,
                                          # target=1) via alpha_t=alpha*target+(1-alpha)*(1-target); 0.25 (the
                                          # RetinaNet-anchor-tuned default) gives tumor LESS weight than background,

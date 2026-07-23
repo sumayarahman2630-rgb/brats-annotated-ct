@@ -1502,3 +1502,92 @@ now that the fp32 cast is in place, and whether the true trigger was
 something this investigation didn't reach (e.g. a genuine activation
 explosion inside the model itself, unrelated to the loss function) --
 if it recurs, the new warning's patient_id will be the fastest lead.
+
+### Follow-up: escalating NaN frequency + gamma revert -- stability follow-up
+
+The same gamma=1.0 run (with the fp32 loss fix already in place) kept
+going and, starting around step 4788, the non-finite-loss warning began
+firing repeatedly -- infrequent at first, but by step 5400-5480 it was
+happening almost every other step. The fp32 fix made this non-fatal and
+visible (as intended), but it clearly did NOT eliminate whatever was
+causing it, and the frequency was climbing over time rather than staying
+flat -- more consistent with a slowly-building instability (weights or
+activations drifting into an unstable regime as training progressed)
+than a one-off bad batch.
+
+Separately, dice through step 6557 (when the run was stopped) never
+showed a clean transition to a continuous, improving pattern. On
+closer, more honest analysis than the previous section gave it: this
+does NOT actually distinguish "gamma=1.0 isn't learning" from "the model
+still predicts ~nothing (P~=0) and dice is purely reflecting how much
+true tumor a given patch happened to contain" -- both produce the exact
+same full spread from ~0.001 to 1.0 with zero learning required, since
+foreground_biased_patch_crop's per-patch tumor voxel count varies
+continuously. The *loss* trend is the more honest signal here, and it
+also showed no clear downward movement (0.106 at step 25, 0.090 at step
+5475, noisy throughout) -- so "no evidence of learning" holds up, just
+via a different argument than dice variety.
+
+However, this comparison has its own confound, symmetric to the
+v3-vs-scratch one from two sections up: an increasing fraction of steps
+in the back half of this window (step ~4788 onward) were skipped
+entirely (no weight update at all) due to the nan issue. That means this
+run does not cleanly test "6557 stable steps of gamma=1.0" -- it tests
+"gamma=1.0 that ran cleanly for ~4800 steps, then was increasingly
+disrupted by a separate, unrelated-to-gamma stability problem." Reverting
+gamma on this evidence alone would not be a rigorous conclusion.
+
+**Decision, made pragmatically rather than as a rigorous conclusion:**
+revert `focal_gamma` to `2.0` anyway, since (a) it's the nearest
+configuration with any track record at all (the step 10000-20000 plateau
+run), and (b) the run has to restart from scratch regardless to address
+the nan escalation, so there's no cost to also giving up on the unproven
+gamma=1.0 hypothesis at the same time rather than running a third
+untested variant blind. This is an honest "no longer worth the
+uncertainty" call, not a "gamma=1.0 disproven" one.
+
+**Stability fixes, `configs/stage3_ct_segmentation.yaml` and
+`training/train_stage3_segmentation.py`:**
+- `lr: 0.0003 -> 0.0002` (reverted). The 0.0003 bump was introduced
+  alongside gamma=1.0 specifically for the plateau; since gamma is being
+  reverted too, and the bump is a plausible contributor to instability
+  that builds up over a long run, both are being walked back together
+  rather than leaving one changed variable in an otherwise-reverted
+  config.
+- `weight_decay: 0.0 -> 0.00001`. Every prior Stage 3 run had zero L2
+  regularization -- nothing was keeping weight/activation magnitude
+  bounded over a long run, which fits an instability that gets *worse*
+  over time rather than appearing immediately.
+- Added a parameter-level `torch.isfinite` check right after
+  `scaler.step()`/`scaler.update()`, as a second, independent guard
+  beyond the loss-level one from the previous section. `GradScaler`
+  already refuses to apply a non-finite gradient, so parameters should
+  never actually go non-finite -- if this check ever fires, that
+  protection failed in some unexpected way, which is a materially worse
+  situation than a single bad batch (the weights are already corrupted,
+  not just this step's gradient) and isn't something a skip-and-continue
+  can recover from. It hard-stops training with `RuntimeError` rather
+  than silently continuing to train a corrupted model.
+- Gradient clipping (`torch.nn.utils.clip_grad_norm_`, `grad_clip_norm:
+  1.0`) was already present since this file's original version -- not a
+  new addition, despite being requested as one; noting this here only to
+  correct that record, no code changed for it.
+
+Full suite: 59/59 passing (no code-level test needed for the config
+reverts; the new parameter-finite guard doesn't have a dedicated CPU
+test since triggering it would require GradScaler's own protection to
+already have failed, not something reproducible on demand).
+
+**Retrain:** from scratch again (no checkpoint survives from the
+gamma=1.0 run). `checkpoint.working_dir` / `training.log_file` should
+point at a new path once more, same collision-avoidance rule as every
+previous restart in this file.
+
+**Not yet verified:** whether this combination (gamma=2.0, lr=0.0002,
+small weight_decay) actually resolves the nan escalation, and whether
+gamma=2.0 was ever really the right call given the confound above --
+if nan recurs even with weight_decay and the lower lr, the next honest
+hypothesis is something structural in the model itself (an
+under-normalized layer, or the architecture being generally prone to
+activation blow-up under this data), not another loss/optimizer
+hyperparameter.
