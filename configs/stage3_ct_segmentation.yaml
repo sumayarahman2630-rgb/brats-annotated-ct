@@ -44,35 +44,29 @@ data:
   intensity_jitter_std: 0.05           # CT-only random scale+shift, std as a fraction of the [-1,1] normalized range
 
 model:
-  base_channels: 64                     # increased from 32 2026-07-24, for tonight's scratch retrain -- 4x the
-                                         # parameter count (34.96M vs 8.74M, computed directly), addressing the
-                                         # "representational ceiling" hypothesis flagged as a candidate explanation
-                                         # for the earlier val-dice plateau. This was ONE candidate hypothesis
-                                         # among several, never confirmed as the actual bottleneck -- a real gamble
-                                         # under tonight's fixed time budget (see PROJECT_NOTES.md's capacity-vs-
-                                         # time-budget follow-up: per-step compute roughly scales with parameter
-                                         # count for this conv-heavy architecture, so this run gets meaningfully
-                                         # fewer total steps in the same wall-clock window than base_channels=32 did).
+  base_channels: 32                     # reverted from 64 back to 32 2026-07-24, same night -- the base_channels=64
+                                         # capacity experiment is abandoned for tonight. Two real attempts both hit
+                                         # non-finite loss (lr=0.0002: step ~1836, escalating/"continuous"; lr=0.0001,
+                                         # confirmed via the actual log after a stale-config false start: step 618,
+                                         # same escalating pattern) -- halving the LR did NOT fix it, so the
+                                         # instability is tied to base_channels=64 itself, not just LR magnitude.
+                                         # With little time left tonight, reverting to the ONE combination with a
+                                         # full, clean, zero-NaN 20000-step track record (base_channels=32,
+                                         # lr=0.0002) rather than continuing to chase this down. NOTE: this is a
+                                         # from-scratch restart -- neither base_channels=64 checkpoint from tonight
+                                         # is loadable here, since base_channels changes every layer's tensor shapes.
+                                         # The capacity hypothesis itself remains untested, not disproven -- it was
+                                         # never given a stable run to actually evaluate.
   channel_mult: [1, 2, 4, 8]
   num_groups: 8
 
 training:
   batch_size: 2
-  lr: 0.0001                            # halved from 0.0002 2026-07-24 -- the base_channels=64 scratch run hit
-                                         # non-finite-loss warnings much earlier (step ~1836) and more frequently
-                                         # ("continuously") than the base_channels=32 run's escalation (which
-                                         # didn't start until step ~4788). The biggest new variable in this run is
-                                         # the 4x larger model (34.96M vs 8.74M params) -- larger weight matrices
-                                         # generally amplify activation/gradient magnitude more per step at a
-                                         # given LR, making the same lr=0.0002 that was fine for base_channels=32
-                                         # more likely to occasionally overflow for base_channels=64. Augmentation
-                                         # (also new tonight) was ruled out first: flips/rotation are exact
-                                         # (shape/value-preserving), and intensity jitter is explicitly clipped to
-                                         # [-1,1], so none of it can introduce an out-of-range value. This is a
-                                         # judgment call under time pressure, not a confirmed root cause --
-                                         # 0.0002 (the earlier reverted-from value, was 0.0003 before that) is the
-                                         # next thing to check if halving doesn't help. See PROJECT_NOTES.md's
-                                         # 2026-07-24 capacity-instability follow-up.
+  lr: 0.0002                            # reverted back to 0.0002 alongside base_channels=32 above -- this is the
+                                         # exact combination that ran the full, clean 20000 steps with zero NaN
+                                         # issues (2026-07-19 through 22). The 0.0001 halving was specifically to
+                                         # compensate for base_channels=64's instability, which no longer applies
+                                         # now that capacity is reverted.
   weight_decay: 0.00001                 # added 2026-07-22, alongside the nan-frequency investigation -- was 0.0
                                          # (no regularization at all) for every prior Stage 3 run; a small L2 term
                                          # gives long training runs something to keep weight/activation magnitude
@@ -80,18 +74,14 @@ training:
                                          # that builds up over time rather than appearing immediately
   lr_schedule: "cosine"
   warmup_steps: 200
-  total_steps: 12000                    # reduced from 30000 2026-07-24 -- that figure was calibrated for the
-                                         # faster base_channels=32 model; base_channels=64 has ~4x the parameters
-                                         # and roughly proportionally more per-step compute, so within tonight's
-                                         # ~2-3 hour window, a SMALLER total_steps that actually completes (full
-                                         # cosine decay to a real low-LR tail) is preferable to an optimistic
-                                         # target that gets cut off mid-schedule at a still-high LR. 12000 is an
-                                         # ESTIMATE, not measured on real hardware -- watch the logged elapsed=
-                                         # field after the first ~200-500 steps and project forward; override with
-                                         # --max_steps if it's clearly going to run long or short (see the retrain
-                                         # command notes). If more time turns out to be available after this
-                                         # completes, --warm_start_checkpoint can extend training with a fresh
-                                         # schedule rather than needing to guess a bigger total_steps up front.
+  total_steps: 20000                    # restored from 12000 back to 20000 2026-07-24, alongside the base_channels
+                                         # revert -- 12000 was calibrated for base_channels=64's slower per-step
+                                         # compute, which no longer applies at base_channels=32 (the exact figure
+                                         # that already completed cleanly once tonight's earlier changes started).
+                                         # Given how much of tonight's window is already spent on the abandoned
+                                         # capacity experiment, check your REMAINING real time now and override
+                                         # with --max_steps if 20000 won't fit -- don't assume the original budget
+                                         # is still available.
   # Real Kaggle run (2026-07-19, 20000 steps) confirmed Dice+BCE ("dice_bce", the
   # original default) collapses toward predicting an essentially empty mask under
   # this project's severe class imbalance -- external Jordan validation came back

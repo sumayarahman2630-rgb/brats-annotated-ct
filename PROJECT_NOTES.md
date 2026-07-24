@@ -1990,3 +1990,38 @@ whether `base_channels=64` itself needs to be abandoned if the
 instability persists even at the lower LR -- that would be the next,
 more disruptive fallback (reverting capacity back to 32, accepting the
 loss of that lever for tonight) if this doesn't help.
+
+### Follow-up: lr halving confirmed tested, still failed -- base_channels=64 abandoned for tonight
+
+The first retry of the lr=0.0001 fix showed `lr=0.0002` in its own log
+(a stale Kaggle-side config copy that hadn't picked up the latest push)
+-- not a real test of the fix. The user re-synced and reran; that run's
+log confirmed `lr=0.0001` was genuinely used this time, and it still hit
+`loss=nan` (step 618, same escalating/multi-warning-per-step pattern as
+both `base_channels=64` failures before it). This settles the earlier
+open question: halving the LR did NOT fix the instability, so it's tied
+to `base_channels=64` itself, not just the LR magnitude on its own.
+
+**Decision:** abandon the capacity increase for tonight. Reverted
+`configs/stage3_ct_segmentation.yaml` to `base_channels=32`, `lr=0.0002`,
+`total_steps=20000` -- the exact combination with a full, clean,
+zero-NaN 20000-step track record. This required a from-scratch restart:
+neither `base_channels=64` checkpoint from tonight (step 1000, or
+whatever the two subsequent attempts reached) is loadable into a
+`base_channels=32` model, since `base_channels` changes every layer's
+tensor shapes throughout the network.
+
+**Honest framing:** the capacity hypothesis (base_channels as a
+possible fix for the earlier val-dice plateau) is NOT disproven by
+tonight -- it was never actually given a stable run to evaluate,
+since it never got past a few hundred/thousand steps before hitting
+instability both times it was tried. It remains an open question for a
+future session with more time to debug properly (e.g. testing base_channels=64
+at a much lower LR from the start, or with a shorter warmup-then-hold
+schedule, rather than fighting it live during a time-critical retrain).
+
+Three real attempts were spent on this experiment before reverting
+(~1836 steps, ~422 steps, ~618 steps, none producing a usable
+checkpoint) -- acknowledged directly to the user as real time cost, not
+glossed over, since it materially affects how much of tonight's
+original window remains for the now-reverted, from-scratch run.
