@@ -38,6 +38,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from data.preprocessing import (
     CT_BACKGROUND_HU,
+    augment_ct_mask_patch,
     bounding_box,
     crop_to_box,
     foreground_biased_patch_crop,
@@ -126,6 +127,10 @@ class SyntheticCTSegDataset(Dataset):
         patch_size: tuple[int, int, int] | None = None,
         foreground_prob: float = 0.5,
         seed: int = 0,
+        augment: bool = False,
+        flip_prob: float = 0.5,
+        rot90_prob: float = 0.5,
+        intensity_jitter_std: float = 0.05,
     ):
         self.patients = patients
         self.ct_clip_range = ct_clip_range
@@ -133,6 +138,12 @@ class SyntheticCTSegDataset(Dataset):
         self.spatial_multiple = spatial_multiple
         self.patch_size = patch_size
         self.foreground_prob = foreground_prob
+        # augment is only ever meaningful when patch_size is set (train items) -- val items
+        # (patch_size=None) never augment regardless of this flag, enforced in __getitem__ below.
+        self.augment = augment
+        self.flip_prob = flip_prob
+        self.rot90_prob = rot90_prob
+        self.intensity_jitter_std = intensity_jitter_std
         self._rng = np.random.default_rng(seed)
 
     def __len__(self) -> int:
@@ -185,6 +196,13 @@ class SyntheticCTSegDataset(Dataset):
             else:
                 ct, mask = random_patch_crop([ct, mask], self.patch_size, self._rng)
 
+            if self.augment:
+                ct, mask = augment_ct_mask_patch(
+                    ct, mask, self._rng,
+                    flip_prob=self.flip_prob, rot90_prob=self.rot90_prob,
+                    intensity_jitter_std=self.intensity_jitter_std,
+                )
+
         return {
             "ct": torch.from_numpy(ct).unsqueeze(0).float(),
             "mask": torch.from_numpy(mask).unsqueeze(0).float(),
@@ -234,8 +252,18 @@ def build_synthetic_ct_dataloaders(config: dict, seed: int = 0) -> tuple[DataLoa
     patch_size = tuple(patch_size) if patch_size else None
     foreground_prob = data_cfg.get("foreground_prob", 0.5)
 
-    train_ds = SyntheticCTSegDataset(train_patients, patch_size=patch_size, foreground_prob=foreground_prob, **common_kwargs)
-    val_ds = SyntheticCTSegDataset(val_patients, patch_size=None, foreground_prob=0.0, **common_kwargs)  # full volume, deliberately different from train
+    train_ds = SyntheticCTSegDataset(
+        train_patients, patch_size=patch_size, foreground_prob=foreground_prob,
+        augment=data_cfg.get("augment", False),
+        flip_prob=data_cfg.get("flip_prob", 0.5),
+        rot90_prob=data_cfg.get("rot90_prob", 0.5),
+        intensity_jitter_std=data_cfg.get("intensity_jitter_std", 0.05),
+        **common_kwargs,
+    )
+    # full volume, deliberately different from train -- val NEVER augments (augment=False,
+    # the class default), regardless of data.augment, so validation always scores the real,
+    # unmodified preprocessed volume.
+    val_ds = SyntheticCTSegDataset(val_patients, patch_size=None, foreground_prob=0.0, **common_kwargs)
 
     batch_size = config["training"].get("batch_size", 1)
     if batch_size > 1 and patch_size is None:

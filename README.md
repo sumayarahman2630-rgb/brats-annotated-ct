@@ -121,6 +121,14 @@ python -m inference.validate_synthetic_segmentation --config configs/stage3_ct_s
 python -m inference.visualize_predictions --config configs/stage3_ct_segmentation.yaml --source both --num_patients 5
 ```
 
+**9. Generate the full Stage 3 report in one run** (training curves, internal + external Dice/IoU CSVs, optional literature comparison chart, and best-to-worst example visualizations for both sources -- everything steps 6-8 produce individually, plus the training curve, in one command after training finishes):
+```bash
+python -m inference.generate_full_report --config configs/stage3_ct_segmentation.yaml \
+    --auto_threshold --use_largest_component \
+    --comparison_label "Author et al. (Year)" --comparison_internal_dice 0.XX --comparison_external_dice 0.XX
+```
+`--comparison_*` args are optional and never fabricated by the script -- omit them (or the comparison chart is skipped) unless you have the real reported numbers to compare against. `--auto_threshold` searches for the best global threshold on the synthetic validation set only (never on Jordan) and reuses it for both reported metrics; `--use_largest_component` keeps only the largest connected component of each thresholded prediction. Both are optional, off by default (plain threshold=0.5, no filtering) if omitted.
+
 Run the test suite (CPU-only, no GPU/real data needed):
 ```bash
 pip install -r requirements.txt
@@ -144,6 +152,8 @@ inference/run_stage2_brats_regression.py   Stage 2: generate the BraTS synthetic
 inference/validate_jordan_segmentation.py  Stage 3 external validation against real Jordan CT
 inference/validate_synthetic_segmentation.py  Stage 3 official full-volume Dice/IoU on the synthetic validation split (not the periodic patch-level training metric)
 inference/visualize_predictions.py    Stage 3 per-patient prediction visualization (CT/real mask/predicted mask), both synthetic val + Jordan
+inference/postprocessing.py           shared Stage 3 post-processing: largest-connected-component filtering, validation-set threshold search
+inference/generate_full_report.py     runs everything above in one command after training finishes (curves + both Dice/IoU CSVs + comparison chart + example visualizations)
 data/preprocessing.py                 shared HU/MRI normalization, resample, brain-mask, crop/pad, foreground-biased patch crop
 data/loaders_synthrad.py              SynthRAD2023 dataset (Stage 1 training data)
 data/loaders_brats.py                 BraTS2020 dataset (Stage 2 input data)

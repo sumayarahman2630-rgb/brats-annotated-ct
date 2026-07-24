@@ -244,3 +244,55 @@ def foreground_biased_patch_crop(
 
     slices = tuple(slice(starts[a], starts[a] + patch_size[a]) for a in range(3))
     return [arr[slices] for arr in arrays]
+
+
+def augment_ct_mask_patch(
+    ct: np.ndarray,
+    mask: np.ndarray,
+    rng: np.random.Generator,
+    flip_prob: float = 0.5,
+    rot90_prob: float = 0.5,
+    intensity_jitter_std: float = 0.05,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Added 2026-07-24 for Stage 3 training-time augmentation, to improve
+    generalization to the small (20-patient) Jordan external cohort and
+    reduce overfitting to the 331 synthetic-CT training patients. Applies
+    identically to `ct` and `mask` so they stay spatially aligned; only
+    ever called on TRAIN patches (never validation).
+
+    Per-axis random flips and a random 90-degree rotation about a random
+    axis pair are used instead of arbitrary-angle rotation: both are exact
+    (no interpolation needed, so the mask stays perfectly binary and the
+    CT is not resampled/blurred), unlike a general-angle rotation which
+    would require an interpolation choice for the mask (nearest-neighbor,
+    to stay binary) and would blur the CT slightly -- not attempted here
+    given the time constraint this was added under.
+
+    `np.flip`/`np.rot90` return views with negative strides that
+    `torch.from_numpy` cannot handle later in the pipeline -- `.copy()`
+    after each is required, not optional.
+
+    Intensity jitter is CT-only (a random scale+shift, applied only to the
+    non-background region so the exact -1.0 background sentinel value stays
+    a clean flat constant, matching normalize_ct's convention) and is
+    skipped entirely if `intensity_jitter_std <= 0`.
+    """
+    for axis in range(3):
+        if rng.random() < flip_prob:
+            ct = np.flip(ct, axis=axis).copy()
+            mask = np.flip(mask, axis=axis).copy()
+
+    if rng.random() < rot90_prob:
+        axes = tuple(int(a) for a in rng.choice(3, size=2, replace=False))
+        k = int(rng.integers(1, 4))
+        ct = np.rot90(ct, k=k, axes=axes).copy()
+        mask = np.rot90(mask, k=k, axes=axes).copy()
+
+    if intensity_jitter_std > 0:
+        scale = 1.0 + rng.normal(0.0, intensity_jitter_std)
+        shift = rng.normal(0.0, intensity_jitter_std)
+        foreground = ct != NORMALIZED_BACKGROUND
+        ct = ct.copy()
+        ct[foreground] = np.clip(ct[foreground] * scale + shift, -1.0, 1.0)
+
+    return ct, mask

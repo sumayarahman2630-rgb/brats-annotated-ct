@@ -1773,3 +1773,140 @@ Output: `/kaggle/working/stage3_synthetic_val_metrics.csv` (per-patient) plus a 
 **Not yet verified:** the actual resulting number on a real checkpoint --
 that's the next Kaggle run's job, and the number this whole addition
 exists to produce.
+
+### Follow-up: previous checkpoint lost again, tonight's scratch retrain package (2026-07-24)
+
+The 20000-step checkpoint (focal_alpha=0.75, external Jordan Dice 0.1987)
+was lost to another Kaggle session reset -- no checkpoint survives, no
+`--warm_start_checkpoint` possible this time. Requested, in priority
+order, for tonight's from-scratch retrain: model capacity, data
+augmentation, evaluation post-processing, and keeping the loss
+configuration unchanged given the time constraint, plus a single
+post-training reporting script.
+
+**1. Model capacity: `base_channels: 32 -> 64`**, `configs/stage3_ct_segmentation.yaml`.
+Exact parameter counts (computed directly, not estimated):
+32 -> 8,742,561 params (8.74M); 64 -> 34,958,657 params (34.96M) -- almost
+exactly 4x, as expected for a conv-heavy U-Net where doubling channel
+width at every level roughly quadruples both parameters and FLOPs per
+layer. **Honest tradeoff flagged directly to the user:** this was one
+candidate hypothesis for the earlier plateau (see the 2026-07-19 gamma
+follow-up), never confirmed as the actual bottleneck -- and a 4x larger
+model training completely from scratch in a fixed ~2-3 hour window gets
+meaningfully FEWER total steps than the smaller model got, which could
+plausibly leave it LESS converged than base_channels=32 would have been
+in the same wall-clock budget, not more. Implemented as explicitly
+requested (their stated priority #1), with this tradeoff stated plainly
+rather than silently absorbed.
+
+**2. Data augmentation**, `data/preprocessing.py`'s new
+`augment_ct_mask_patch` (random per-axis flips + one random 90-degree
+rotation about a random axis pair, both EXACT/lossless -- no
+interpolation, so the mask stays perfectly binary and the CT isn't
+blurred; arbitrary-angle rotation was NOT attempted given the time
+constraint), plus optional CT-only intensity jitter (light random
+scale+shift, background sentinel value left untouched). Wired into
+`data/loaders_synthetic_ct.py`'s `SyntheticCTSegDataset` and
+`build_synthetic_ct_dataloaders` -- applied to TRAIN patches only, never
+validation (enforced structurally: the val dataset is never constructed
+with `augment=True`). New config block: `data.augment: true`,
+`flip_prob: 0.5`, `rot90_prob: 0.5`, `intensity_jitter_std: 0.05`.
+
+**3. Evaluation post-processing**, new `inference/postprocessing.py`:
+`keep_largest_connected_component` (scipy.ndimage.label, keeps only the
+largest connected region of a thresholded prediction) and
+`find_optimal_threshold` (sweeps candidate thresholds against
+ALREADY-COMPUTED probability volumes -- no extra inference cost -- and
+returns the single GLOBAL threshold maximizing MEAN Dice across a whole
+set). **Methodological point made explicit in the code and worth
+restating here:** the threshold search must only ever run on the
+SYNTHETIC validation set, never on Jordan directly -- a per-sample
+optimal threshold would be cherry-picking, and tuning a threshold on
+Jordan itself would compromise its role as a true held-out external
+test. `validate_synthetic_segmentation.py` gained `--auto_threshold`
+(writes the chosen value to `best_threshold.txt`) and
+`--use_largest_component`; `validate_jordan_segmentation.py` gained only
+`--use_largest_component` -- deliberately no threshold-search flag there,
+by design. Both default OFF (unchanged, threshold=0.5, no filtering)
+unless explicitly requested. `scipy` added explicitly to
+`requirements.txt` (was already present transitively via scikit-image).
+
+**4. Loss: reverted, not left as it was.** The config had drifted to
+`focal_alpha=0.6` / `total_steps=30000` from the 2026-07-23
+over-segmentation fix, whose outcome was never conclusively confirmed
+(the follow-up run ended on an ambiguous single low val-dice data point
+and the requested fuller trend was never provided). Per explicit
+instruction to keep "the only configuration verified to converge
+cleanly" tonight, reverted `focal_alpha` back to `0.75` (the real,
+complete 20000-step run's value, mean dice 0.2352 / max 0.3196) --
+accepting its known, documented over-segmentation tendency as a
+tradeoff for a known-converging starting point, rather than compounding
+tonight's other changes with an unverified loss variant too.
+
+**`total_steps` also reduced, 30000 -> 12000**, NOT requested directly
+but necessary given #1: 30000 was calibrated for the faster
+base_channels=32 model. Given base_channels=64's ~4x compute, a
+generously-high total_steps would very likely get cut off mid-schedule
+at a still-substantial LR within a 2-3 hour window; a smaller,
+actually-reachable target lets the cosine schedule complete its full
+decay to a proper low-LR convergence tail instead. This is an ESTIMATE
+(no real-hardware timing measurement was possible), explicitly flagged
+as such in the config comment, with the exact recalibration procedure
+given to the user (watch `elapsed=` after ~200-500 steps, override with
+`--max_steps` if needed) and a reminder that `--warm_start_checkpoint`
+(built earlier this project) can extend training later with a fresh
+schedule if more time turns out to be available, rather than needing to
+guess a bigger number up front.
+
+**5. `inference/generate_full_report.py`** (new): one command producing
+everything after training finishes -- training loss/Dice curves (from
+`training.log_file`), internal (synthetic) full-volume Dice/IoU CSV +
+summary, external (Jordan) full-volume Dice/IoU CSV + summary using the
+SAME threshold as internal (never independently searched on Jordan), an
+optional literature comparison bar chart, and 3-5 example prediction
+panels per source. **The comparison chart is never fabricated**: it only
+renders if `--comparison_label` and at least one `--comparison_*_dice`
+value are explicitly supplied by the user; without them, the script logs
+why it skipped the chart rather than inventing a placeholder Wang et al.
+(2024) number -- no such citation or reported value was available to
+verify. Example visualizations are sampled EVENLY across the sorted
+best-to-worst Dice range (`np.linspace` over sorted indices), not just
+the best cases, so the images actually show the real quality spread.
+
+Verified CPU-only: `augment_ct_mask_patch` unit-tested directly (spatial
+alignment between ct/mask preserved under flip+rotation, mask stays
+exactly binary, background sentinel untouched by intensity jitter,
+true no-op at zero probabilities); `postprocessing.py`'s two functions
+unit-tested directly (component filtering removes the right blob,
+threshold search recovers the correct value on a constructed case); a
+full subprocess end-to-end run of `generate_full_report.py` with fake
+synthetic CT patients, fake Jordan DICOM slices, a fake training log,
+and an untrained checkpoint, confirming every output file is produced
+(including confirming the comparison chart is genuinely skipped, not
+just empty, when no comparison args are given). Full suite passing
+(72 tests before this addition's own 2 new end-to-end tests).
+
+**Reminder given to the user directly, per their own request:** use
+Kaggle's "Quick Save" periodically during tonight's run -- losing the
+checkpoint to a session reset is exactly what happened both times
+before this.
+
+**Honest Dice estimate given to the user:** internal ~0.7 / external
+~0.6 in one ~2-3 hour night, starting completely from scratch on a
+larger, slower, unproven-capacity model, was assessed as unlikely --
+communicated directly rather than left implicit, alongside the specific
+reasoning (current best internal full-volume number is not yet even
+measured with the new script, the previous checkpoint's Jordan Dice was
+0.1987, and tonight bets on an unconfirmed capacity hypothesis under a
+harder time constraint than either prior run had). A more modest,
+still real improvement was framed as the honest target, with the
+explicit augmentation/post-processing additions as the more reliably
+positive (if smaller) levers of the changes made tonight.
+
+**Not yet verified:** literally everything about tonight's run's actual
+outcome -- base_channels=64's memory footprint on a real T4 (OOM risk
+flagged, batch_size=1 given as the fastest contingency), the realistic
+step-time and whether 12000 steps was a good estimate, and whether any
+of tonight's changes net improve Dice over the lost 20000-step/
+alpha=0.75 checkpoint's (unmeasured, since it never got a full-volume
+Dice number before being lost) real performance.

@@ -49,6 +49,7 @@ import yaml
 
 from data.loaders_jordan_ct import discover_jordan_slices, JordanCTSegDataset
 from data.preprocessing import pad_to_multiple
+from inference.postprocessing import keep_largest_connected_component
 from models.unet3d_segmentation import build_segmentation_model
 from training.checkpoint import find_latest_checkpoint, load_checkpoint
 from training.train_stage3_segmentation import build_synthetic_ct_dataloaders
@@ -67,7 +68,8 @@ def parse_args():
     parser.add_argument("--jordan_ct_root", type=str, default=None, help="Override data.jordan_ct_root from --config.")
     parser.add_argument("--jordan_mask_root", type=str, default=None, help="Override data.jordan_mask_root from --config.")
     parser.add_argument("--replication_depth", type=int, default=16, help="How many times to replicate each 2D slice along Z to fake a thin 3D volume -- see module docstring's limitation #1.")
-    parser.add_argument("--threshold", type=float, default=0.5, help="Sigmoid threshold for the binary prediction.")
+    parser.add_argument("--threshold", type=float, default=0.5, help="Sigmoid threshold for the binary prediction. If you ran validate_synthetic_segmentation.py --auto_threshold, reuse the value it wrote to best_threshold.txt here -- never search a threshold on Jordan directly (see inference/postprocessing.py's docstring).")
+    parser.add_argument("--use_largest_component", action="store_true", help="Keep only the largest connected component of each thresholded prediction.")
     parser.add_argument("--output_dir", type=str, default="/kaggle/working/jordan_validation")
     return parser.parse_args()
 
@@ -94,9 +96,17 @@ def dice_iou(pred_bin: np.ndarray, target: np.ndarray, smooth: float = 1.0) -> t
     return dice, iou
 
 
-def evaluate_jordan(model, device, jordan_ct_root: str, jordan_mask_root: str, replication_depth: int, spatial_multiple: int, threshold: float) -> list[dict]:
+def evaluate_jordan(
+    model, device, jordan_ct_root: str, jordan_mask_root: str, replication_depth: int,
+    spatial_multiple: int, threshold: float, use_largest_component: bool = False,
+) -> list[dict]:
     """Run every matched Jordan slice through the pseudo-3D workaround and
-    return per-slice Dice/IoU."""
+    return per-slice Dice/IoU. `threshold` should be a value already fixed
+    elsewhere (0.5, or one selected on the SYNTHETIC validation set by
+    validate_synthetic_segmentation.py --auto_threshold) -- this function
+    deliberately has no threshold-search option of its own; searching a
+    threshold on Jordan directly would compromise its role as a true
+    held-out external test (see inference/postprocessing.py's docstring)."""
     slices = discover_jordan_slices(jordan_ct_root, jordan_mask_root)
     if not slices:
         raise RuntimeError(f"No matched Jordan slices found (ct_root={jordan_ct_root!r}, mask_root={jordan_mask_root!r}).")
@@ -116,6 +126,8 @@ def evaluate_jordan(model, device, jordan_ct_root: str, jordan_mask_root: str, r
         pred_center = pred_volume.squeeze(0).squeeze(0).cpu().numpy()[center_index]
         pred_center = pred_center[: mask_2d.shape[0], : mask_2d.shape[1]]  # undo any H/W padding
         pred_bin = (pred_center > threshold).astype(np.float32)
+        if use_largest_component:
+            pred_bin = keep_largest_connected_component(pred_bin)
 
         dice, iou = dice_iou(pred_bin, mask_2d)
         log.info("%s slice %d: dice=%.4f iou=%.4f", item["patient_id"], item["slice_num"], dice, iou)
@@ -212,7 +224,10 @@ def main():
     spatial_multiple = data_cfg.get("spatial_multiple", 16)
     patch_size = tuple(data_cfg["patch_size"])
 
-    rows = evaluate_jordan(model, device, jordan_ct_root, jordan_mask_root, args.replication_depth, spatial_multiple, args.threshold)
+    rows = evaluate_jordan(
+        model, device, jordan_ct_root, jordan_mask_root, args.replication_depth,
+        spatial_multiple, args.threshold, use_largest_component=args.use_largest_component,
+    )
     write_csv(rows, os.path.join(args.output_dir, "jordan_metrics.csv"))
 
     dices = [r["dice"] for r in rows]

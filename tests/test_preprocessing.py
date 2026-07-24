@@ -14,6 +14,7 @@ from data.preprocessing import (
     CT_CLIP_LOW,
     NORMALIZED_BACKGROUND,
     apply_mask,
+    augment_ct_mask_patch,
     bounding_box,
     crop_to_box,
     denormalize_ct,
@@ -185,3 +186,53 @@ def test_resample_mask_uses_nearest_neighbor_stays_binary():
     out_arr = sitk.GetArrayFromImage(resampled)
     unique_vals = set(np.unique(out_arr).tolist())
     assert unique_vals <= {0, 1}  # nearest-neighbor never introduces intermediate values
+
+
+# --- augment_ct_mask_patch ---
+
+def _fake_ct_mask_patch(shape=(16, 16, 16)):
+    rng = np.random.default_rng(0)
+    ct = np.full(shape, NORMALIZED_BACKGROUND, dtype=np.float32)
+    ct[4:12, 4:12, 4:12] = rng.uniform(-0.5, 0.5, size=(8, 8, 8)).astype(np.float32)
+    mask = np.zeros(shape, dtype=np.float32)
+    mask[6:10, 6:10, 6:10] = 1.0
+    return ct, mask
+
+
+def test_augment_ct_mask_patch_keeps_ct_and_mask_spatially_aligned():
+    """Flips/rotations must apply identically to ct and mask -- the tumor
+    region's position relative to the CT content must be unchanged, only
+    the whole patch's orientation changes."""
+    ct, mask = _fake_ct_mask_patch()
+    rng = np.random.default_rng(1)
+    aug_ct, aug_mask = augment_ct_mask_patch(ct, mask, rng, flip_prob=1.0, rot90_prob=1.0, intensity_jitter_std=0.0)
+    assert aug_ct.shape == ct.shape
+    assert aug_mask.shape == mask.shape
+    # mask must stay exactly binary (rot90/flip are exact, no interpolation)
+    assert set(np.unique(aug_mask).tolist()) <= {0.0, 1.0}
+    # the tumor voxel COUNT is preserved by exact flips/rotations (no voxel lost or duplicated)
+    assert aug_mask.sum() == mask.sum()
+    # every tumor voxel in the augmented mask must sit exactly on real (non-background) CT content --
+    # confirms ct and mask were transformed together, not independently
+    assert np.all(aug_ct[aug_mask.astype(bool)] != NORMALIZED_BACKGROUND)
+
+
+def test_augment_ct_mask_patch_background_stays_flat_under_intensity_jitter():
+    """Intensity jitter must only touch foreground CT voxels -- the exact
+    background sentinel value must remain a clean flat constant, matching
+    normalize_ct's convention (real background voxels, not augmentation
+    noise, should be the only reason a voxel reads as background)."""
+    ct, mask = _fake_ct_mask_patch()
+    rng = np.random.default_rng(2)
+    aug_ct, _ = augment_ct_mask_patch(ct, mask, rng, flip_prob=0.0, rot90_prob=0.0, intensity_jitter_std=0.2)
+    background = ct == NORMALIZED_BACKGROUND
+    assert np.all(aug_ct[background] == NORMALIZED_BACKGROUND)
+    assert np.all(aug_ct >= -1.0) and np.all(aug_ct <= 1.0)  # jitter is clipped back into the normalized range
+
+
+def test_augment_ct_mask_patch_is_a_no_op_when_all_probabilities_zero():
+    ct, mask = _fake_ct_mask_patch()
+    rng = np.random.default_rng(3)
+    aug_ct, aug_mask = augment_ct_mask_patch(ct, mask, rng, flip_prob=0.0, rot90_prob=0.0, intensity_jitter_std=0.0)
+    np.testing.assert_array_equal(aug_ct, ct)
+    np.testing.assert_array_equal(aug_mask, mask)

@@ -34,9 +34,25 @@ data:
   max_patients: null
   train_val_split: 0.9                 # patient-level split, no leakage -- same algorithm as Stage 1
   num_workers: 4
+  # Training-time augmentation, added 2026-07-24 for tonight's retrain -- applied to TRAIN
+  # patches only (never validation, which stays exactly the real preprocessed volume), to
+  # improve generalization to the 20-patient Jordan external cohort and reduce overfitting to
+  # the 331 synthetic-CT training patients. See data/preprocessing.py's augment_ct_mask_patch.
+  augment: true
+  flip_prob: 0.5                       # per-axis independent flip probability (up to 3 axes)
+  rot90_prob: 0.5                      # probability of one random 90-degree rotation about a random axis pair
+  intensity_jitter_std: 0.05           # CT-only random scale+shift, std as a fraction of the [-1,1] normalized range
 
 model:
-  base_channels: 32
+  base_channels: 64                     # increased from 32 2026-07-24, for tonight's scratch retrain -- 4x the
+                                         # parameter count (34.96M vs 8.74M, computed directly), addressing the
+                                         # "representational ceiling" hypothesis flagged as a candidate explanation
+                                         # for the earlier val-dice plateau. This was ONE candidate hypothesis
+                                         # among several, never confirmed as the actual bottleneck -- a real gamble
+                                         # under tonight's fixed time budget (see PROJECT_NOTES.md's capacity-vs-
+                                         # time-budget follow-up: per-step compute roughly scales with parameter
+                                         # count for this conv-heavy architecture, so this run gets meaningfully
+                                         # fewer total steps in the same wall-clock window than base_channels=32 did).
   channel_mult: [1, 2, 4, 8]
   num_groups: 8
 
@@ -53,11 +69,18 @@ training:
                                          # that builds up over time rather than appearing immediately
   lr_schedule: "cosine"
   warmup_steps: 200
-  total_steps: 30000                    # extended from 20000 2026-07-23 -- unlike every prior plateau in this
-                                         # file, the completed 20000-step run's val dice was still generally
-                                         # rising (noisy, but ~0.20 early -> ~0.31 by the end, not flat), so more
-                                         # steps is a reasonable lever this time, not a blind retry of something
-                                         # already proven not to help
+  total_steps: 12000                    # reduced from 30000 2026-07-24 -- that figure was calibrated for the
+                                         # faster base_channels=32 model; base_channels=64 has ~4x the parameters
+                                         # and roughly proportionally more per-step compute, so within tonight's
+                                         # ~2-3 hour window, a SMALLER total_steps that actually completes (full
+                                         # cosine decay to a real low-LR tail) is preferable to an optimistic
+                                         # target that gets cut off mid-schedule at a still-high LR. 12000 is an
+                                         # ESTIMATE, not measured on real hardware -- watch the logged elapsed=
+                                         # field after the first ~200-500 steps and project forward; override with
+                                         # --max_steps if it's clearly going to run long or short (see the retrain
+                                         # command notes). If more time turns out to be available after this
+                                         # completes, --warm_start_checkpoint can extend training with a fresh
+                                         # schedule rather than needing to guess a bigger total_steps up front.
   # Real Kaggle run (2026-07-19, 20000 steps) confirmed Dice+BCE ("dice_bce", the
   # original default) collapses toward predicting an essentially empty mask under
   # this project's severe class imbalance -- external Jordan validation came back
@@ -82,22 +105,23 @@ training:
                                          # track record, restarting for the nan issue regardless) rather than a
                                          # rigorously confirmed one -- see PROJECT_NOTES.md's stability follow-up
                                          # for the full, honest reasoning.
-  focal_alpha: 0.6                      # only used when loss_type: focal -- weights the RARE class (tumor,
-                                         # target=1) via alpha_t=alpha*target+(1-alpha)*(1-target); 0.25 (the
-                                         # RetinaNet-anchor-tuned default) gave tumor LESS weight than background,
-                                         # backwards for our extreme foreground rarity -- flipped to 0.75 on
-                                         # 2026-07-19 after dice got stuck oscillating between two smooth=1.0
-                                         # dice-formula artifacts (0.0000/0.5000), traced back to predictions
-                                         # never crossing the 0.5 threshold on tumor voxels at all under 0.25.
-                                         # Lowered from 0.75 to 0.6 on 2026-07-23: the completed 20000-step run at
-                                         # 0.75 stopped collapsing to empty (good) but visibly over-corrected the
-                                         # other way -- inference/visualize_predictions.py on a real checkpoint
-                                         # showed the predicted mask covering a much larger area than the real
-                                         # tumor (over-segmentation, false positives), consistent with 0.75
-                                         # weighting "miss a tumor voxel" 3x worse than "falsely predict tumor" --
-                                         # too aggressive now that the original collapse-to-empty problem is
-                                         # solved. 0.6 still favors the rare class over background (unlike the
-                                         # original 0.25), just less extremely.
+  focal_alpha: 0.75                     # reverted from 0.6 back to 0.75 on 2026-07-24, per explicit instruction
+                                         # to keep tonight's retrain on "the only configuration verified to
+                                         # converge cleanly so far" given the time constraint -- the 0.6 change
+                                         # (2026-07-23, addressing visually-confirmed over-segmentation) was never
+                                         # conclusively evaluated end-to-end (its 30000-step run ended with an
+                                         # ambiguous single low val-dice data point and no full trend was ever
+                                         # provided to confirm or rule out a regression), so it is NOT "verified"
+                                         # in the same sense 0.75 is (a full, real 20000-step run with a
+                                         # documented, genuinely-rising dice trend, mean 0.2352 / max 0.3196).
+                                         # Weights the RARE class (tumor, target=1) via
+                                         # alpha_t=alpha*target+(1-alpha)*(1-target); known to over-segment
+                                         # somewhat at this value (see the 2026-07-23 over-segmentation note in
+                                         # PROJECT_NOTES.md) -- accepted as a known, documented tradeoff for
+                                         # tonight in exchange for a known-converging starting point; the
+                                         # optional post-processing threshold search added tonight
+                                         # (inference/postprocessing.py) is one way to partially compensate for
+                                         # this at evaluation time without retraining.
   amp: true
   grad_clip_norm: 1.0
   ema_decay: 0.999                      # EMA state saved for reference only -- inference/validate_jordan_segmentation.py always evaluates RAW weights, same anti-contamination pattern as Stage 1
