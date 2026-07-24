@@ -1910,3 +1910,46 @@ step-time and whether 12000 steps was a good estimate, and whether any
 of tonight's changes net improve Dice over the lost 20000-step/
 alpha=0.75 checkpoint's (unmeasured, since it never got a full-volume
 Dice number before being lost) real performance.
+
+### Follow-up: augmentation crashed real training at step ~25 -- rotation swapped patch shape
+
+Tonight's real run crashed almost immediately:
+`RuntimeError: stack expects each tensor to be equal size, but got
+[1, 96, 96, 64] at entry 0 and [1, 96, 64, 96] at entry 1`. Root cause:
+`patch_size = [96, 96, 64]` is NOT cubic, and `augment_ct_mask_patch`
+picked a fully random axis pair for its 90-degree rotation. A 90-degree
+rotation SWAPS the extents of its two rotated axes -- rotating in the
+(0,2) or (1,2) plane turns (96, 96, 64) into (96, 64, 96) or
+(64, 96, 96); only the (0,1) plane (both 96) preserves the shape. Since
+rotation was applied independently per sample with a uniformly random
+axis choice, different samples in the same batch could end up with
+different shapes, and `DataLoader`'s default collate crashed trying to
+stack them. A design oversight from earlier tonight: the augmentation
+was verified against a CUBIC fake patch (16,16,16) in testing, where
+every axis pair is valid, so this exact failure mode was never
+reproduced before the real run hit it.
+
+**Fix**, `data/preprocessing.py`'s `augment_ct_mask_patch`: restricts
+the rotation to only axis pairs whose sizes are already equal (computed
+from the actual patch shape at call time, not hardcoded to "(0,1)") --
+rotating in such a plane preserves the overall shape exactly for any k.
+If a patch_size has no equal-size axis pair at all, rotation is skipped
+for that patch (flips still apply) rather than ever risking a shape
+change. Chosen over the user's other offered option (drop rotation
+entirely) since it keeps rotation as real augmentation for the actual
+(96, 96, 64) patch shape in use, at the cost of restricting it to one
+plane instead of three.
+
+Verified: (1) a new unit test using an anisotropic (16, 16, 10) patch
+(mirroring (96,96,64)'s "two axes equal, one different" pattern, which
+the original cubic-patch test could not have caught) confirms the
+output shape is preserved across 30 random seeds with `rot90_prob=1.0`
+(always attempt rotation), and that rotation is still actually
+happening (not silently disabled) via an asymmetric mask region; (2) a
+direct reproduction using the real `SyntheticCTSegDataset` +
+`DataLoader` pipeline with an anisotropic patch shape, `batch_size=2`,
+and `rot90_prob=1.0` confirms no collate crash across multiple batches
+-- the same code path that crashed in production. Full suite passing.
+
+**Not yet verified:** whether this was the ONLY crash-causing issue in
+tonight's changes -- the retrain needs to be re-attempted to confirm.

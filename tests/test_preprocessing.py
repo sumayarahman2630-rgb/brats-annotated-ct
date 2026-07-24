@@ -236,3 +236,28 @@ def test_augment_ct_mask_patch_is_a_no_op_when_all_probabilities_zero():
     aug_ct, aug_mask = augment_ct_mask_patch(ct, mask, rng, flip_prob=0.0, rot90_prob=0.0, intensity_jitter_std=0.0)
     np.testing.assert_array_equal(aug_ct, ct)
     np.testing.assert_array_equal(aug_mask, mask)
+
+
+def test_augment_ct_mask_patch_never_changes_shape_on_a_non_cubic_patch():
+    """Real bug found 2026-07-24: patch_size (96, 96, 64) isn't cubic, and
+    rotating in the (0,2) or (1,2) plane swaps those axes' extents,
+    changing the sample's shape -- since rotation was applied per sample
+    with a random axis pair, different samples in the same training batch
+    ended up with different shapes and crashed DataLoader's default
+    collate. Uses the same "two axes equal, one different" shape pattern
+    (16, 16, 10) and runs many trials with rot90_prob=1.0 (always attempt
+    rotation) to confirm the output shape is preserved every time, not
+    just on lucky draws."""
+    shape = (16, 16, 10)
+    ct = np.full(shape, NORMALIZED_BACKGROUND, dtype=np.float32)
+    mask = np.zeros(shape, dtype=np.float32)
+    mask[2:5, 9:14, 4:6] = 1.0  # asymmetric across axes 0/1 so a 90-degree rotation in that plane is actually visible
+    saw_a_rotation = False
+    for seed in range(30):
+        rng = np.random.default_rng(seed)
+        aug_ct, aug_mask = augment_ct_mask_patch(ct, mask, rng, flip_prob=0.0, rot90_prob=1.0, intensity_jitter_std=0.0)
+        assert aug_ct.shape == shape
+        assert aug_mask.shape == shape
+        if not np.array_equal(aug_mask, mask):
+            saw_a_rotation = True
+    assert saw_a_rotation  # confirms rotation is actually still happening (in the valid (0,1) plane), not silently disabled

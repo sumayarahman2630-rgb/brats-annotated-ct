@@ -268,6 +268,21 @@ def augment_ct_mask_patch(
     to stay binary) and would blur the CT slightly -- not attempted here
     given the time constraint this was added under.
 
+    Real bug found 2026-07-24, step ~25 of a real training run: patch_size
+    (96, 96, 64) is NOT cubic, and a 90-degree rotation SWAPS the extents
+    of its two rotated axes -- rotating in the (0,2) or (1,2) plane turns
+    (96, 96, 64) into (96, 64, 96) or (64, 96, 96), changing that one
+    sample's shape. Since rotation was applied independently per sample
+    with a uniformly random axis pair, different samples in the same batch
+    ended up with different shapes, and DataLoader's default collate
+    crashed trying to stack them (`RuntimeError: stack expects each tensor
+    to be equal size`). Fixed by restricting the rotation to only axis
+    pairs whose sizes are already equal -- rotating in such a plane always
+    preserves the overall shape exactly, for any k. For (96, 96, 64) this
+    means only the (0, 1) plane is used; if a patch_size has no equal-size
+    axis pair at all, rotation is skipped for that patch (flips still
+    apply) rather than ever risking a shape change.
+
     `np.flip`/`np.rot90` return views with negative strides that
     `torch.from_numpy` cannot handle later in the pipeline -- `.copy()`
     after each is required, not optional.
@@ -282,8 +297,9 @@ def augment_ct_mask_patch(
             ct = np.flip(ct, axis=axis).copy()
             mask = np.flip(mask, axis=axis).copy()
 
-    if rng.random() < rot90_prob:
-        axes = tuple(int(a) for a in rng.choice(3, size=2, replace=False))
+    equal_axis_pairs = [(a, b) for a in range(3) for b in range(a + 1, 3) if ct.shape[a] == ct.shape[b]]
+    if equal_axis_pairs and rng.random() < rot90_prob:
+        axes = equal_axis_pairs[int(rng.integers(0, len(equal_axis_pairs)))]
         k = int(rng.integers(1, 4))
         ct = np.rot90(ct, k=k, axes=axes).copy()
         mask = np.rot90(mask, k=k, axes=axes).copy()
