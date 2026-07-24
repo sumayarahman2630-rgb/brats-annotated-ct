@@ -1721,3 +1721,55 @@ regardless of Stage 3 tuning). Told to the user directly: 0.6 from a
 current best of ~0.32 is a large jump, more likely to need several
 iterations (and possibly a full-volume validation script to measure
 against) than one config change.
+
+### Added: inference/validate_synthetic_segmentation.py -- the real, citable Stage 3 metric
+
+The gap flagged in the previous section (no dedicated script computing
+real full-volume Dice across the whole synthetic validation set) came up
+again while drafting `methodology_draft.md`'s Evaluation Metrics section:
+the only number available for the synthetic split was the periodic
+`quick_validation` check, which the methodology draft itself flags as a
+center-cropped, patch-level monitoring signal, not the full-volume metric
+Section 6.2 actually describes. Needed for an "official," citable Stage 3
+performance number.
+
+New script, `inference/validate_synthetic_segmentation.py`: runs the same
+full-volume sliding-window inference (`predict_full_volume`) that
+`inference/visualize_predictions.py` already uses for its qualitative
+panels, but over EVERY validation patient (all held-out patients from
+`build_synthetic_ct_dataloaders`, not a capped handful) and computes/logs
+Dice and IoU for each one (via `validate_jordan_segmentation.py`'s
+`dice_iou` helper, imported rather than duplicated -- it's a generic,
+shape-agnostic Dice/IoU formula with nothing Jordan-specific about it, and
+both scripts already live within the same pipeline stage, unlike the
+cross-stage duplication convention this project otherwise follows).
+Writes a per-patient CSV plus a mean/std summary log line, mirroring
+`validate_jordan_segmentation.py`'s existing reporting pattern.
+
+This is now the THIRD, distinct Stage 3 Dice/IoU number this project
+produces, and they must not be reported interchangeably:
+1. `train_stage3_segmentation.py`'s periodic `quick_validation` -- cheap,
+   center-cropped patch check, in-training monitoring only.
+2. `validate_jordan_segmentation.py` -- real hospital CT, external,
+   out-of-distribution, pseudo-3D workaround (see its own module
+   docstring for the format/dimensionality caveats).
+3. `validate_synthetic_segmentation.py` (this addition) -- full-volume,
+   in-distribution (synthetic training domain), the number that should be
+   reported as the model's actual segmentation performance on its own
+   training distribution.
+
+Verified CPU-only: `evaluate_synthetic_val` unit-tested directly (one
+Dice/IoU row per val patient, both metrics in [0,1]), plus a full
+subprocess end-to-end run with fake synthetic CT patients and a
+freshly-initialized (untrained) checkpoint, confirming the CSV is written
+with the right columns and row count. Full suite: 65/65 passing.
+
+**Kaggle command** (produces the number that belongs in the paper/thesis):
+```bash
+python -m inference.validate_synthetic_segmentation --config configs/stage3_ct_segmentation.yaml
+```
+Output: `/kaggle/working/stage3_synthetic_val_metrics.csv` (per-patient) plus a summary log line with mean/std Dice and IoU across the full validation split.
+
+**Not yet verified:** the actual resulting number on a real checkpoint --
+that's the next Kaggle run's job, and the number this whole addition
+exists to produce.
