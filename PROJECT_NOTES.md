@@ -1953,3 +1953,40 @@ and `rot90_prob=1.0` confirms no collate crash across multiple batches
 
 **Not yet verified:** whether this was the ONLY crash-causing issue in
 tonight's changes -- the retrain needs to be re-attempted to confirm.
+
+### Follow-up: base_channels=64 run hit non-finite loss much earlier and more often
+
+After the rotation fix, the base_channels=64 scratch run got further but
+hit `loss=nan` warnings starting around step ~1836, described as
+occurring "continuously" -- multiple warnings in quick succession,
+different patient pairs each time (ruling out one specific corrupted
+file). This is both EARLIER and apparently denser than the
+base_channels=32 run's escalation from two sections up, which didn't
+start until step ~4788.
+
+**Judgment call, not a confirmed diagnosis** (time-constrained, no
+real-hardware profiling possible): the biggest new variable in this run
+is the 4x larger model (34.96M vs 8.74M params, computed earlier
+tonight). Larger weight matrices generally amplify activation/gradient
+magnitude more per step at a given LR, so the same `lr=0.0002` that was
+acceptable for base_channels=32 is more likely to occasionally overflow
+for base_channels=64. Augmentation (the other new variable tonight) was
+checked and ruled out as a likely cause first: flips/rotation are exact,
+shape/value-preserving operations, and intensity jitter is explicitly
+clipped to `[-1, 1]` -- none of tonight's augmentation additions can
+introduce an out-of-range value into the training data.
+
+**Fix:** `training.lr` halved, `0.0002 -> 0.0001`, in
+`configs/stage3_ct_segmentation.yaml`. Recommended reusing
+`--warm_start_checkpoint` from the step-1000 checkpoint (already saved,
+weights protected from corruption by the earlier non-finite-parameter
+guard) rather than restarting completely from scratch again --
+consistent with the collision-avoidance rule from every previous
+warm-start in this file: point `checkpoint.working_dir` /
+`training.log_file` at new paths for the resumed run.
+
+**Not yet verified:** whether halving lr actually resolves this, or
+whether `base_channels=64` itself needs to be abandoned if the
+instability persists even at the lower LR -- that would be the next,
+more disruptive fallback (reverting capacity back to 32, accepting the
+loss of that lever for tonight) if this doesn't help.
