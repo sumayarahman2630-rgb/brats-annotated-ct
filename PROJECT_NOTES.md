@@ -2025,3 +2025,51 @@ Three real attempts were spent on this experiment before reverting
 checkpoint) -- acknowledged directly to the user as real time cost, not
 glossed over, since it materially affects how much of tonight's
 original window remains for the now-reverted, from-scratch run.
+
+### Follow-up: severe reproducible slowdown at ~step 7000-7600, memory diagnostics added
+
+Separately from the capacity/instability issue, two real runs both hit
+a severe slowdown (10-20s -> 2000+s per 25 steps) around the same step
+range (~7000-7600). A sudden, reproducible cliff at a consistent step
+count -- not gradual or random -- points at hitting a resource ceiling
+rather than ordinary GPU contention.
+
+Checked the two strongest candidates directly before guessing: (1)
+`training/ema.py`'s `EMA.update` -- already `@torch.no_grad()`, in-place
+ops, properly `.detach()`ed on the source parameter; clean, ruled out.
+(2) the main training loop (`train_stage3_segmentation.py`) -- `.item()`
+and `.detach()` used correctly everywhere logged/scored, no lingering
+GPU tensor references found. Neither is a confirmed root cause after
+this level of inspection.
+
+**Best-guess fix implemented (not conclusively confirmed):**
+`persistent_workers=True` added to both the train and val DataLoaders
+in `build_synthetic_ct_dataloaders` (guarded by `num_workers > 0`).
+`CycleLoader` creates a brand-new `iter(train_loader)` at every epoch
+boundary (~165 steps at 331 train patients / batch_size=2); without
+this flag, that tears down and respawns the entire worker pool each
+time. Worth an honest correction made mid-diagnosis: Kaggle notebooks
+run on Linux, not Windows, where this kind of respawn is comparatively
+cheap (fork-based, not spawn-based) -- so confidence this is *the*
+cause is moderate, not high, even though the fix itself is safe and
+has no downside regardless of whether it's the real cause.
+
+**Diagnostic logging added regardless** (`log_memory_usage` in
+`train_stage3_segmentation.py`, called every `checkpoint_interval`
+steps, piggybacking on the existing 1000-step cadence rather than
+adding a new config key): logs GPU `memory_allocated`/`memory_reserved`
+(as requested) AND host RSS via `/proc/self/status` (Linux-only,
+returns "n/a" gracefully elsewhere) -- a host-side leak (e.g. in
+repeated per-sample SimpleITK file reads, which re-read every patient
+from disk on every `__getitem__` call with no caching) would leave GPU
+memory looking completely normal, so GPU-only logging could have
+hidden the real signal if that turns out to be the actual cause.
+
+Verified: full Stage 3 test suite (17 tests, including the real
+subprocess end-to-end training test, which exercises this exact
+DataLoader/logging code path with `device=cpu`) passing.
+
+**Not yet verified:** whether `persistent_workers=True` actually
+prevents the slowdown recurring -- if it does, the memory diagnostics
+mostly go unused; if it doesn't, the same logging is the plan for
+getting real data instead of just symptoms next time, as requested.

@@ -272,12 +272,25 @@ def build_synthetic_ct_dataloaders(config: dict, seed: int = 0) -> tuple[DataLoa
             "different bounding-box shapes without it and can't be stacked into a batch)."
         )
 
+    train_num_workers = data_cfg.get("num_workers", 4)
+    val_num_workers = max(1, data_cfg.get("num_workers", 4) // 2)
+    # persistent_workers=True added 2026-07-24: CycleLoader (training/train_stage3_segmentation.py)
+    # creates a brand-new iter(train_loader) at every epoch boundary (~165 steps at 331 train
+    # patients / batch_size=2) -- without this flag, that tears down and respawns the ENTIRE worker
+    # pool each time. Real runs twice hit a severe, reproducible slowdown (10-20s -> 2000+s per 25
+    # steps) around the same step range (~7000-7600); repeated worker teardown/respawn is the
+    # single most likely candidate found investigating this under time pressure, but it was not
+    # conclusively confirmed as the root cause (EMA.update and the main training loop were checked
+    # directly and are clean) -- see PROJECT_NOTES.md's 2026-07-24 slowdown follow-up, including the
+    # GPU/host memory diagnostic logging added alongside this fix for if it recurs a third time.
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=data_cfg.get("num_workers", 4), drop_last=True, pin_memory=True,
+        num_workers=train_num_workers, drop_last=True, pin_memory=True,
+        persistent_workers=train_num_workers > 0,
     )
     val_loader = DataLoader(
         val_ds, batch_size=1, shuffle=False,
-        num_workers=max(1, data_cfg.get("num_workers", 4) // 2), pin_memory=True,
+        num_workers=val_num_workers, pin_memory=True,
+        persistent_workers=val_num_workers > 0,
     )
     return train_loader, val_loader

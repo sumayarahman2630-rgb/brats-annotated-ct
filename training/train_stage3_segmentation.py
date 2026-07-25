@@ -44,6 +44,42 @@ log = logging.getLogger("train_stage3_segmentation")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
+def _host_rss_mb() -> float | None:
+    """Best-effort host (CPU) resident memory in MB, via /proc/self/status
+    (Linux/Kaggle) -- returns None (not raises) on any platform/format this
+    doesn't work on, e.g. Windows, so it never breaks a training run just
+    for diagnostic logging."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0  # kB -> MB
+    except Exception:
+        return None
+    return None
+
+
+def log_memory_usage(step: int, device: torch.device) -> None:
+    """Added 2026-07-24 after two real runs both hit a severe, reproducible
+    slowdown (10-20s -> 2000+s per 25 steps) around the same step range
+    (~7000-7600) -- logs GPU allocated/reserved memory AND host RSS, since
+    a host-side leak (e.g. in repeated per-sample file reads) would leave
+    GPU memory looking completely normal and hide the real signal if only
+    GPU stats were logged."""
+    gpu_allocated_mb = gpu_reserved_mb = None
+    if device.type == "cuda":
+        gpu_allocated_mb = torch.cuda.memory_allocated(device) / (1024 ** 2)
+        gpu_reserved_mb = torch.cuda.memory_reserved(device) / (1024 ** 2)
+    host_rss_mb = _host_rss_mb()
+    log.info(
+        "step %d memory: gpu_allocated=%s gpu_reserved=%s host_rss=%s",
+        step,
+        f"{gpu_allocated_mb:.1f}MB" if gpu_allocated_mb is not None else "n/a",
+        f"{gpu_reserved_mb:.1f}MB" if gpu_reserved_mb is not None else "n/a",
+        f"{host_rss_mb:.1f}MB" if host_rss_mb is not None else "n/a",
+    )
+
+
 def set_seed(seed: int) -> None:
     """Seed every RNG a training run touches, for reproducibility."""
     random.seed(seed)
@@ -517,6 +553,7 @@ def main():
         if global_step % checkpoint_interval == 0 or global_step == total_steps:
             path = save_checkpoint(ckpt_cfg["working_dir"], global_step, model, ema, optimizer, scheduler, keep_last_n=keep_last_n)
             log.info("Saved checkpoint: %s", path)
+            log_memory_usage(global_step, device)
 
         if global_step % val_interval == 0 or global_step == total_steps:
             try:
