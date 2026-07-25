@@ -2073,3 +2073,43 @@ DataLoader/logging code path with `device=cpu`) passing.
 prevents the slowdown recurring -- if it does, the memory diagnostics
 mostly go unused; if it doesn't, the same logging is the plan for
 getting real data instead of just symptoms next time, as requested.
+
+### Added: EMA-weight evaluation in generate_full_report.py, non-blocking
+
+Requested alongside the speed fix above, explicitly framed as
+non-blocking (inference-time only, zero training risk) so it didn't
+delay starting tonight's retrain.
+
+`inference/generate_full_report.py` now also loads the checkpoint's
+`ema_state` (via a real `EMA` object passed to `load_checkpoint`,
+previously never loaded anywhere in this project) and runs the SAME
+internal + external full-volume evaluation on a second model instance
+with EMA weights copied in (`ema.copy_to(ema_model)`), using the exact
+same threshold and post-processing settings as the raw-weight pass so
+weights are the only variable that differs between the two reported
+numbers. Both passes now share one code path
+(`evaluate_model_full`, refactored out of the previously inline raw-only
+logic) rather than duplicating the internal/external evaluation twice.
+Writes separate `_ema`-suffixed CSVs and logs a direct raw-vs-EMA
+mean-dice comparison line. Deliberately does NOT change which weights
+drive visualizations or the comparison chart (still raw) -- this is
+purely an additional, clearly-labeled informational metric, consistent
+with this project's established anti-EMA-contamination convention (every
+other evaluation script always uses raw weights for the number that
+actually gets reported/decided on). New `--skip_ema_eval` flag to omit
+it if not wanted.
+
+Also confirmed (not re-implemented, since both were already correct and
+already unit-tested before tonight): `--auto_threshold` performs a real
+17-value sweep (`np.arange(0.1, 0.95, 0.05)`, the function's actual
+default, not a single fixed alternative), and `--use_largest_component`
+correctly discards small spurious blobs while keeping the largest region
+-- both directly re-verified via `tests/test_postprocessing.py`'s
+existing passing tests before answering.
+
+Verified: strengthened the existing end-to-end report test to save a
+REAL (not `None`) `ema_state` in its fake checkpoint fixture, genuinely
+exercising the EMA load/`copy_to` path rather than relying on
+`load_checkpoint`'s harmless None-fallback; asserts both new `_ema` CSVs
+are produced and the "RAW vs EMA" comparison log line actually appears.
+Full suite passing.

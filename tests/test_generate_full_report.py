@@ -19,6 +19,7 @@ from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, generate_uid
 
 from models.unet3d_segmentation import build_segmentation_model
+from training.ema import EMA
 
 
 def _write_fake_synthetic_ct_patient(root, patient_id, shape=(24, 24, 24)):
@@ -106,8 +107,12 @@ def test_generate_full_report_end_to_end_saves_every_expected_output(tmp_path):
     ckpt_dir = tmp_path / "checkpoints"
     ckpt_dir.mkdir()
     model = build_segmentation_model(config)
+    # Real (not None) ema_state, so this test actually exercises the EMA load/copy_to path rather
+    # than relying on load_checkpoint's None-fallback (which would silently skip EMA loading).
+    ema = EMA(model, decay=0.99)
+    ema.update(model)
     torch.save(
-        {"step": 0, "model_state": model.state_dict(), "ema_state": None, "optimizer_state": None, "scheduler_state": None, "extra": {}},
+        {"step": 0, "model_state": model.state_dict(), "ema_state": ema.state_dict(), "optimizer_state": None, "scheduler_state": None, "extra": {}},
         ckpt_dir / "ckpt_step00000000.pt",
     )
 
@@ -125,10 +130,13 @@ def test_generate_full_report_end_to_end_saves_every_expected_output(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "Done." in result.stderr
+    assert "RAW vs EMA" in result.stderr  # confirms the EMA side-by-side comparison actually ran
 
     assert (output_dir / "training_curves.png").exists()
     assert (output_dir / "internal_synthetic_metrics.csv").exists()
     assert (output_dir / "external_jordan_metrics.csv").exists()
+    assert (output_dir / "internal_synthetic_metrics_ema.csv").exists()
+    assert (output_dir / "external_jordan_metrics_ema.csv").exists()
     assert (output_dir / "comparison_chart.png").exists()
     assert len(list((output_dir / "examples_synthetic").glob("*.png"))) >= 1
     assert len(list((output_dir / "examples_jordan").glob("*.png"))) >= 1
@@ -136,6 +144,10 @@ def test_generate_full_report_end_to_end_saves_every_expected_output(tmp_path):
     with open(output_dir / "internal_synthetic_metrics.csv") as f:
         internal_rows = list(csv.DictReader(f))
     assert len(internal_rows) == 1  # 75/25 split over 4 patients -- 1 val patient
+
+    with open(output_dir / "internal_synthetic_metrics_ema.csv") as f:
+        ema_internal_rows = list(csv.DictReader(f))
+    assert len(ema_internal_rows) == 1
 
     with open(output_dir / "external_jordan_metrics.csv") as f:
         external_rows = list(csv.DictReader(f))

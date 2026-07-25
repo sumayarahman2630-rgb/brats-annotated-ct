@@ -121,13 +121,13 @@ python -m inference.validate_synthetic_segmentation --config configs/stage3_ct_s
 python -m inference.visualize_predictions --config configs/stage3_ct_segmentation.yaml --source both --num_patients 5
 ```
 
-**9. Generate the full Stage 3 report in one run** (training curves, internal + external Dice/IoU CSVs, optional literature comparison chart, and best-to-worst example visualizations for both sources -- everything steps 6-8 produce individually, plus the training curve, in one command after training finishes):
+**9. Generate the full Stage 3 report in one run** (training curves, internal + external Dice/IoU CSVs, a side-by-side EMA-weight comparison, optional literature comparison chart, and best-to-worst example visualizations for both sources -- everything steps 6-8 produce individually, plus the training curve, in one command after training finishes):
 ```bash
 python -m inference.generate_full_report --config configs/stage3_ct_segmentation.yaml \
     --auto_threshold --use_largest_component \
     --comparison_label "Author et al. (Year)" --comparison_internal_dice 0.XX --comparison_external_dice 0.XX
 ```
-`--comparison_*` args are optional and never fabricated by the script -- omit them (or the comparison chart is skipped) unless you have the real reported numbers to compare against. `--auto_threshold` searches for the best global threshold on the synthetic validation set only (never on Jordan) and reuses it for both reported metrics; `--use_largest_component` keeps only the largest connected component of each thresholded prediction. Both are optional, off by default (plain threshold=0.5, no filtering) if omitted.
+`--comparison_*` args are optional and never fabricated by the script -- omit them (or the comparison chart is skipped) unless you have the real reported numbers to compare against. `--auto_threshold` searches for the best global threshold on the synthetic validation set only (never on Jordan) and reuses it for both reported metrics; `--use_largest_component` keeps only the largest connected component of each thresholded prediction. Both are optional, off by default (plain threshold=0.5, no filtering) if omitted. An EMA-weight evaluation (internal + external, same threshold/post-processing, separate CSVs suffixed `_ema`) runs alongside the raw-weight one by default -- purely informational, since raw weights remain what visualizations and the comparison chart use (this project's established anti-EMA-contamination convention); pass `--skip_ema_eval` to omit it.
 
 Run the test suite (CPU-only, no GPU/real data needed):
 ```bash

@@ -21,6 +21,11 @@ training session finishes:
    predicted mask, via inference/visualize_predictions.py's save_panel),
    sampled evenly across the sorted best-to-worst Dice range so the
    images show the actual spread of quality, not just the best cases.
+6. An additional, side-by-side EMA-weight evaluation (internal + external,
+   same threshold and post-processing as the raw-weight pass, separate
+   CSVs) -- purely informational. Raw weights remain what visualizations
+   and the comparison chart use, per this project's established
+   anti-EMA-contamination convention; pass --skip_ema_eval to omit it.
 
 Everything is saved to --output_dir; nothing is only printed to the console.
 
@@ -46,6 +51,7 @@ from inference.validate_synthetic_segmentation import compute_synthetic_predicti
 from inference.visualize_predictions import _best_slice_index, save_panel
 from models.unet3d_segmentation import build_segmentation_model
 from training.checkpoint import find_latest_checkpoint, load_checkpoint
+from training.ema import EMA
 from training.train_stage3_segmentation import build_synthetic_ct_dataloaders
 
 log = logging.getLogger("generate_full_report")
@@ -65,6 +71,7 @@ def parse_args():
     parser.add_argument("--comparison_label", type=str, default=None, help="Literature baseline name for the comparison chart, e.g. 'Wang et al. (2024)'. No chart is produced unless this AND at least one comparison dice value are supplied.")
     parser.add_argument("--comparison_internal_dice", type=float, default=None)
     parser.add_argument("--comparison_external_dice", type=float, default=None)
+    parser.add_argument("--skip_ema_eval", action="store_true", help="Skip the additional EMA-weight evaluation (on by default) -- raw weights remain the only ones used for visualizations and the comparison chart, matching this project's established anti-EMA-contamination convention; EMA is reported purely as a side-by-side informational metric.")
     return parser.parse_args()
 
 
@@ -170,6 +177,35 @@ def save_jordan_visualizations(model, device, jordan_ct_root: str, jordan_mask_r
         save_panel(ct_2d, mask_2d, pred_center, threshold, f"Jordan -- {row['patient_id']} slice {row['slice_num']}, dice={row['dice']:.3f}", out_path)
 
 
+def evaluate_model_full(
+    model, device, val_loader, patch_size, jordan_ct_root, jordan_mask_root,
+    replication_depth, spatial_multiple, threshold, use_largest_component, label,
+):
+    """Runs the full internal (synthetic) + external (Jordan) full-volume
+    evaluation for a given model instance -- shared between the raw-weight
+    and EMA-weight passes so both go through the EXACT same scoring path,
+    differing only in which weights are loaded into `model` beforehand.
+    `label` is just for the log lines (e.g. "raw" or "ema"). Returns
+    (synthetic_rows, jordan_rows, internal_mean, internal_std,
+    external_mean, external_std) -- NOT the raw prediction volumes, since
+    only the raw-weight pass needs those for visualizations."""
+    predictions = compute_synthetic_predictions(model, device, val_loader, patch_size)
+    synthetic_rows = score_predictions(predictions, threshold, use_largest_component=use_largest_component)
+    internal_dices = [r["dice"] for r in synthetic_rows]
+    internal_mean, internal_std = float(np.mean(internal_dices)), float(np.std(internal_dices))
+    log.info("[%s] INTERNAL (synthetic val, full-volume): %d patients, mean dice=%.4f (std=%.4f)", label, len(synthetic_rows), internal_mean, internal_std)
+
+    jordan_rows = evaluate_jordan(
+        model, device, jordan_ct_root, jordan_mask_root, replication_depth,
+        spatial_multiple, threshold, use_largest_component=use_largest_component,
+    )
+    external_dices = [r["dice"] for r in jordan_rows]
+    external_mean, external_std = float(np.mean(external_dices)), float(np.std(external_dices))
+    log.info("[%s] EXTERNAL (Jordan, full-volume, threshold=%.2f): %d slices, mean dice=%.4f (std=%.4f)", label, threshold, len(jordan_rows), external_mean, external_std)
+
+    return predictions, synthetic_rows, jordan_rows, internal_mean, internal_std, external_mean, external_std
+
+
 def save_comparison_chart(internal_dice: float, external_dice: float, comparison_label: str, comparison_internal_dice: float | None, comparison_external_dice: float | None, output_dir: str) -> None:
     """Grouped bar chart: this work vs. the supplied literature baseline.
     Only called when the caller confirmed at least one comparison value
@@ -222,32 +258,37 @@ def main():
         ckpt_path = find_latest_checkpoint(search_dirs)
         if ckpt_path is None:
             raise RuntimeError(f"No Stage 3 checkpoint found in {search_dirs}.")
-    step, _extra = load_checkpoint(ckpt_path, model, ema=None, optimizer=None, scheduler=None, map_location=device.type)
-    log.info("Loaded checkpoint %s (step %d) -- RAW weights, no EMA involved", ckpt_path, step)
+    # ema is loaded alongside raw weights (previously never loaded anywhere in this project) so its
+    # shadow state is available for the side-by-side EMA evaluation below -- this does NOT change the
+    # established anti-EMA-contamination convention: `model` (raw) is still what visualizations and the
+    # comparison chart use; EMA is only an additional, clearly-labeled informational metric.
+    ema = EMA(model, decay=config["training"].get("ema_decay", 0.999))
+    step, _extra = load_checkpoint(ckpt_path, model, ema=ema, optimizer=None, scheduler=None, map_location=device.type)
+    log.info("Loaded checkpoint %s (step %d) -- RAW weights drive the primary report; EMA weights also loaded for the side-by-side comparison below", ckpt_path, step)
     model.eval()
 
     # 1. Training curves
     plot_training_curves(config["training"]["log_file"], args.output_dir)
 
-    # 2. Internal (synthetic) full-volume Dice/IoU
+    # 2+3. Internal + external full-volume Dice/IoU, RAW weights
     _train_loader, val_loader = build_synthetic_ct_dataloaders(config, seed=config.get("seed", 0))
     patch_size = tuple(config["data"]["patch_size"])
+    data_cfg = config["data"]
+
     predictions = compute_synthetic_predictions(model, device, val_loader, patch_size)
 
     threshold = args.threshold
     if args.auto_threshold:
         prob_target_pairs = [(prob, mask) for _pid, prob, mask in predictions]
         threshold, searched_mean_dice = find_optimal_threshold(prob_target_pairs, dice_fn=lambda p, t: dice_iou(p, t)[0])
-        log.info("--auto_threshold: selected threshold=%.2f (search mean dice=%.4f)", threshold, searched_mean_dice)
+        log.info("--auto_threshold: selected threshold=%.2f (search mean dice=%.4f, raw weights)", threshold, searched_mean_dice)
 
     synthetic_rows = score_predictions(predictions, threshold, use_largest_component=args.use_largest_component)
     write_csv(synthetic_rows, os.path.join(args.output_dir, "internal_synthetic_metrics.csv"))
     internal_dices = [r["dice"] for r in synthetic_rows]
     internal_mean, internal_std = float(np.mean(internal_dices)), float(np.std(internal_dices))
-    log.info("INTERNAL (synthetic val, full-volume): %d patients, mean dice=%.4f (std=%.4f)", len(synthetic_rows), internal_mean, internal_std)
+    log.info("[raw] INTERNAL (synthetic val, full-volume): %d patients, mean dice=%.4f (std=%.4f)", len(synthetic_rows), internal_mean, internal_std)
 
-    # 3. External (Jordan) full-volume Dice/IoU -- same threshold as internal, never independently tuned
-    data_cfg = config["data"]
     jordan_rows = evaluate_jordan(
         model, device, data_cfg["jordan_ct_root"], data_cfg["jordan_mask_root"], args.replication_depth,
         data_cfg.get("spatial_multiple", 16), threshold, use_largest_component=args.use_largest_component,
@@ -261,7 +302,32 @@ def main():
             writer.writerow(row)
     external_dices = [r["dice"] for r in jordan_rows]
     external_mean, external_std = float(np.mean(external_dices)), float(np.std(external_dices))
-    log.info("EXTERNAL (Jordan, full-volume, threshold=%.2f reused from internal): %d slices, mean dice=%.4f (std=%.4f)", threshold, len(jordan_rows), external_mean, external_std)
+    log.info("[raw] EXTERNAL (Jordan, full-volume, threshold=%.2f reused from internal): %d slices, mean dice=%.4f (std=%.4f)", threshold, len(jordan_rows), external_mean, external_std)
+
+    # 3b. EMA-weight evaluation, side-by-side -- same threshold as raw (isolates weights as the only
+    # variable), same scoring path via evaluate_model_full. Purely informational: raw weights remain
+    # what visualizations and the comparison chart use below, per this project's established
+    # anti-EMA-contamination convention (every other evaluation script always uses raw weights).
+    if not args.skip_ema_eval:
+        ema_model = build_segmentation_model(config).to(device)
+        ema.copy_to(ema_model)
+        ema_model.eval()
+        (_ema_predictions, ema_synthetic_rows, ema_jordan_rows,
+         ema_internal_mean, ema_internal_std, ema_external_mean, ema_external_std) = evaluate_model_full(
+            ema_model, device, val_loader, patch_size, data_cfg["jordan_ct_root"], data_cfg["jordan_mask_root"],
+            args.replication_depth, data_cfg.get("spatial_multiple", 16), threshold, args.use_largest_component, "ema",
+        )
+        write_csv(ema_synthetic_rows, os.path.join(args.output_dir, "internal_synthetic_metrics_ema.csv"))
+        with open(os.path.join(args.output_dir, "external_jordan_metrics_ema.csv"), "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=jordan_csv_fields)
+            writer.writeheader()
+            for row in ema_jordan_rows:
+                writer.writerow(row)
+        log.info(
+            "RAW vs EMA (same threshold=%.2f, informational only -- raw weights remain what visualizations/comparison use): "
+            "internal mean dice raw=%.4f ema=%.4f | external mean dice raw=%.4f ema=%.4f",
+            threshold, internal_mean, ema_internal_mean, external_mean, ema_external_mean,
+        )
 
     # 4. Comparison chart -- only if the caller supplied real numbers
     if args.comparison_label and (args.comparison_internal_dice is not None or args.comparison_external_dice is not None):
