@@ -2113,3 +2113,64 @@ exercising the EMA load/`copy_to` path rather than relying on
 `load_checkpoint`'s harmless None-fallback; asserts both new `_ema` CSVs
 are produced and the "RAW vs EMA" comparison log line actually appears.
 Full suite passing.
+
+### Follow-up: visualization showed unfiltered prediction despite --use_largest_component
+
+Real bug reported: after running the report with `--use_largest_component`,
+an example visualization (a two-hemisphere-blob prediction) showed an
+unchanged dice (0.592) and an unchanged predicted mask -- looked like
+the flag wasn't doing anything.
+
+**Confirmed root cause (question 1):** it wasn't. Both
+`save_synthetic_visualizations_with_ct` and `save_jordan_visualizations`
+always displayed the RAW probability, thresholded fresh, completely
+ignoring `use_largest_component` -- the dice NUMBER in the title came
+from `scored_rows` (correctly post-processed, via `score_predictions`),
+but the IMAGE never was. So the title's number could reflect filtering
+while the pixels never did, exactly the mismatch reported.
+
+**On question 2 (is the CSV row itself actually filtered, or is the
+component genuinely 3D-connected across the midline):** could not check
+the user's actual checkpoint/data directly. Gave the exact command to
+check it themselves (`grep BraTS20_Training_241
+internal_synthetic_metrics.csv`) and explained both possible outcomes:
+if the CSV dice already differed from the unfiltered 0.592, the
+component is genuinely one connected 3D region (the "two blobs" join at
+a different Z-slice than the one displayed) and nothing to fix there;
+if it matched 0.592 exactly, the bug above was the whole explanation.
+
+**Fix:** extracted the post-processing logic into a new, directly
+testable `prepare_display_prediction(prob, threshold,
+use_largest_component, min_size_ratio)` in
+`inference/generate_full_report.py`, used by both visualization
+functions -- applies the exact same `keep_largest_connected_component`
+call that `score_predictions`/`evaluate_jordan` use for the CSVs, so the
+displayed mask and the reported number can no longer disagree. Threaded
+through `main()`'s calls to both.
+
+**Alternative approach (question 3), implemented as an opt-in, not a
+default:** `keep_largest_connected_component` gained a `min_size_ratio`
+parameter (default 0.0, exact original strict single-largest behavior,
+verified backward-compatible) -- if set, also keeps any OTHER component
+at least that fraction of the largest one's size, addressing genuine
+bilateral/multi-focal disease that a strict single-largest filter would
+otherwise incorrectly discard just for being smaller than the primary
+lesion. Threaded through as a new `--min_size_ratio` flag on all three
+scripts (`validate_synthetic_segmentation.py`, `
+validate_jordan_segmentation.py`, `generate_full_report.py`) -- and,
+critically, through BOTH the scoring functions (`score_predictions`,
+`evaluate_jordan`) AND the visualization functions consistently, since
+adding it to only one side would have silently reintroduced the exact
+same display-vs-metric mismatch this whole fix exists to close.
+
+Verified: a new direct unit test
+(`test_prepare_display_prediction_matches_score_predictions_post_processing`)
+constructs a real two-blob case (one small/spurious, one large/real),
+confirms `prepare_display_prediction` produces byte-identical output to
+what `score_predictions`' underlying filtering call would produce for
+the same input, and confirms the dice each would score is identical --
+directly closing the reported gap rather than only asserting the script
+still runs. Plus new `min_size_ratio` tests in
+`tests/test_postprocessing.py` (default matches strict original
+behavior; a comparably-sized second component is kept at a positive
+ratio; a truly spurious tiny blob is still dropped). Full suite passing.

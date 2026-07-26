@@ -14,18 +14,40 @@ import numpy as np
 from scipy import ndimage
 
 
-def keep_largest_connected_component(binary_mask: np.ndarray) -> np.ndarray:
+def keep_largest_connected_component(binary_mask: np.ndarray, min_size_ratio: float = 0.0) -> np.ndarray:
     """Zero out every connected component of `binary_mask` except the
     largest one (by voxel count) -- removes small, spurious false-positive
     blobs scattered elsewhere in the volume without touching the model's
     main predicted region. A no-op on an all-background mask (nothing to
-    filter)."""
+    filter).
+
+    `min_size_ratio` (added 2026-07-25, default 0.0 -- exact original
+    behavior, only the single largest component is ever kept): if > 0,
+    ALSO keeps any other component whose voxel count is at least this
+    fraction of the largest component's size. Addresses genuine
+    bilateral/multi-focal disease (e.g. a real tumor present in both
+    hemispheres, or two real separate lesions of comparable size) --
+    without this, a real second lesion would be discarded purely for
+    being slightly smaller than the primary one, which is not the
+    intent of this filter (removing SPURIOUS small blobs, not every
+    blob but the biggest). Two genuinely bilateral lobes that are
+    themselves connected in 3D (e.g. joined across the midline at a
+    different slice than whichever one is being viewed) are already ONE
+    component to `ndimage.label` regardless of this parameter -- that
+    is not a bug in this function, just a real property of the 3D
+    connectivity, most easily confirmed by comparing this function's
+    output voxel count before/after against the un-filtered prediction.
+    """
     labeled, num_components = ndimage.label(binary_mask)
     if num_components == 0:
         return binary_mask
     sizes = ndimage.sum(binary_mask, labeled, index=range(1, num_components + 1))
     largest_label = int(np.argmax(sizes)) + 1
-    return (labeled == largest_label).astype(binary_mask.dtype)
+    if min_size_ratio <= 0:
+        return (labeled == largest_label).astype(binary_mask.dtype)
+    largest_size = sizes.max()
+    keep_labels = [i + 1 for i, s in enumerate(sizes) if s >= largest_size * min_size_ratio]
+    return np.isin(labeled, keep_labels).astype(binary_mask.dtype)
 
 
 def find_optimal_threshold(

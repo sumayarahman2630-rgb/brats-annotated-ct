@@ -70,6 +70,7 @@ def parse_args():
     parser.add_argument("--replication_depth", type=int, default=16, help="How many times to replicate each 2D slice along Z to fake a thin 3D volume -- see module docstring's limitation #1.")
     parser.add_argument("--threshold", type=float, default=0.5, help="Sigmoid threshold for the binary prediction. If you ran validate_synthetic_segmentation.py --auto_threshold, reuse the value it wrote to best_threshold.txt here -- never search a threshold on Jordan directly (see inference/postprocessing.py's docstring).")
     parser.add_argument("--use_largest_component", action="store_true", help="Keep only the largest connected component of each thresholded prediction.")
+    parser.add_argument("--min_size_ratio", type=float, default=0.0, help="With --use_largest_component: also keep any other component at least this fraction of the largest one's size (default 0.0 -- strict, only the single largest). Use e.g. 0.5 to preserve genuine bilateral/multi-focal disease.")
     parser.add_argument("--output_dir", type=str, default="/kaggle/working/jordan_validation")
     return parser.parse_args()
 
@@ -99,6 +100,7 @@ def dice_iou(pred_bin: np.ndarray, target: np.ndarray, smooth: float = 1.0) -> t
 def evaluate_jordan(
     model, device, jordan_ct_root: str, jordan_mask_root: str, replication_depth: int,
     spatial_multiple: int, threshold: float, use_largest_component: bool = False,
+    min_size_ratio: float = 0.0,
 ) -> list[dict]:
     """Run every matched Jordan slice through the pseudo-3D workaround and
     return per-slice Dice/IoU. `threshold` should be a value already fixed
@@ -127,7 +129,7 @@ def evaluate_jordan(
         pred_center = pred_center[: mask_2d.shape[0], : mask_2d.shape[1]]  # undo any H/W padding
         pred_bin = (pred_center > threshold).astype(np.float32)
         if use_largest_component:
-            pred_bin = keep_largest_connected_component(pred_bin)
+            pred_bin = keep_largest_connected_component(pred_bin, min_size_ratio=min_size_ratio)
 
         dice, iou = dice_iou(pred_bin, mask_2d)
         log.info("%s slice %d: dice=%.4f iou=%.4f", item["patient_id"], item["slice_num"], dice, iou)
@@ -227,6 +229,7 @@ def main():
     rows = evaluate_jordan(
         model, device, jordan_ct_root, jordan_mask_root, args.replication_depth,
         spatial_multiple, args.threshold, use_largest_component=args.use_largest_component,
+        min_size_ratio=args.min_size_ratio,
     )
     write_csv(rows, os.path.join(args.output_dir, "jordan_metrics.csv"))
 

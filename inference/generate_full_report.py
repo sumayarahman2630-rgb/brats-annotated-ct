@@ -66,6 +66,7 @@ def parse_args():
     parser.add_argument("--threshold", type=float, default=0.5, help="Sigmoid threshold for the binary prediction (ignored if --auto_threshold is set).")
     parser.add_argument("--auto_threshold", action="store_true", help="Search for the global threshold maximizing mean internal Dice, and reuse it for the external evaluation too.")
     parser.add_argument("--use_largest_component", action="store_true", help="Keep only the largest connected component of each thresholded prediction, both sources.")
+    parser.add_argument("--min_size_ratio", type=float, default=0.0, help="With --use_largest_component: also keep any other component at least this fraction of the largest one's size (default 0.0 -- strict, only the single largest). Use e.g. 0.5 to preserve genuine bilateral/multi-focal disease instead of discarding a real second lesion just for being smaller than the primary one.")
     parser.add_argument("--replication_depth", type=int, default=16, help="Jordan pseudo-3D slice replication depth -- see data/loaders_jordan_ct.py's module docstring.")
     parser.add_argument("--num_visualizations", type=int, default=5, help="Example prediction panels per source, sampled evenly across the sorted best-to-worst Dice range.")
     parser.add_argument("--comparison_label", type=str, default=None, help="Literature baseline name for the comparison chart, e.g. 'Wang et al. (2024)'. No chart is produced unless this AND at least one comparison dice value are supplied.")
@@ -130,12 +131,47 @@ def _select_evenly_spread(rows: list[dict], n: int) -> list[dict]:
     return out
 
 
+def prepare_display_prediction(
+    prob: np.ndarray, threshold: float, use_largest_component: bool, min_size_ratio: float = 0.0,
+) -> np.ndarray:
+    """The exact post-processing to apply to a probability array (2D slice
+    or full 3D volume) before displaying it, so a visualization always
+    matches the reported CSV number computed via the same
+    use_largest_component/min_size_ratio settings (score_predictions /
+    evaluate_jordan). Extracted 2026-07-25 as its own small, directly
+    testable function after a real bug: both visualization functions
+    previously always displayed the raw probability thresholded fresh,
+    ignoring use_largest_component entirely, so a run with
+    --use_largest_component could show an unchanged image/dice while the
+    CSV's number had genuinely been filtered."""
+    if not use_largest_component:
+        return prob
+    pred_bin = (prob > threshold).astype(np.float32)
+    return keep_largest_connected_component(pred_bin, min_size_ratio=min_size_ratio)
+
+
 def save_synthetic_visualizations_with_ct(
     predictions: list[tuple[str, np.ndarray, np.ndarray, np.ndarray]],
     scored_rows: list[dict], threshold: float, output_dir: str, n: int,
+    use_largest_component: bool = False, min_size_ratio: float = 0.0,
 ) -> None:
     """predictions: (patient_id, ct_vol, prob_vol, mask_vol) tuples, already
-    computed -- no extra inference needed for the visualizations."""
+    computed -- no extra inference needed for the visualizations.
+
+    Real bug found 2026-07-25: this previously always displayed the RAW
+    probability volume thresholded fresh, regardless of
+    use_largest_component -- the dice number in the title reflected
+    post-processing (from `scored_rows`, computed by score_predictions),
+    but the displayed mask did not, so running with
+    --use_largest_component could show an unchanged image with an
+    unchanged dice while the CSV's number and mask genuinely had been
+    filtered (or, in a case where the "two blobs" are actually one
+    connected 3D component -- e.g. joined across the midline at a
+    different slice than the one being displayed -- correctly showing no
+    change, which is not a bug, just an accurate reflection of 3D
+    connectivity that a single 2D slice cannot fully convey). Now applies
+    the SAME post-processing to the full 3D volume before slicing for
+    display, so the image always matches the reported number."""
     selected = _select_evenly_spread(scored_rows, n)
     pred_by_patient = {pid: (ct, prob, mask) for pid, ct, prob, mask in predictions}
     out_dir = os.path.join(output_dir, "examples_synthetic")
@@ -143,18 +179,26 @@ def save_synthetic_visualizations_with_ct(
     for rank, row in enumerate(selected, start=1):
         ct_vol, prob_vol, mask_vol = pred_by_patient[row["patient_id"]]
         slice_idx = _best_slice_index(mask_vol)
+        display_pred = prepare_display_prediction(prob_vol, threshold, use_largest_component, min_size_ratio)
         out_path = os.path.join(out_dir, f"{rank:02d}_dice{row['dice']:.3f}_{row['patient_id']}.png")
         save_panel(
-            ct_vol[slice_idx], mask_vol[slice_idx], prob_vol[slice_idx], threshold,
+            ct_vol[slice_idx], mask_vol[slice_idx], display_pred[slice_idx], threshold,
             f"synthetic -- {row['patient_id']}, dice={row['dice']:.3f}, slice {slice_idx}", out_path,
         )
 
 
-def save_jordan_visualizations(model, device, jordan_ct_root: str, jordan_mask_root: str, jordan_rows: list[dict], replication_depth: int, spatial_multiple: int, threshold: float, output_dir: str, n: int) -> None:
+def save_jordan_visualizations(
+    model, device, jordan_ct_root: str, jordan_mask_root: str, jordan_rows: list[dict],
+    replication_depth: int, spatial_multiple: int, threshold: float, output_dir: str, n: int,
+    use_largest_component: bool = False, min_size_ratio: float = 0.0,
+) -> None:
     """Re-runs pseudo-3D inference only for the small number of selected
     slices (cheap -- Jordan has at most a few dozen slices total), rather
     than threading prediction volumes through evaluate_jordan's existing,
-    unmodified return type."""
+    unmodified return type. Same post-processing-consistency fix as
+    save_synthetic_visualizations_with_ct above, applied 2D (matching
+    evaluate_jordan's own 2D-level filtering, since Jordan has no real 3D
+    volume to filter in)."""
     selected = _select_evenly_spread(jordan_rows, n)
     slices = discover_jordan_slices(jordan_ct_root, jordan_mask_root)
     slice_by_key = {(s.patient_id, s.slice_num): s for s in slices}
@@ -173,13 +217,15 @@ def save_jordan_visualizations(model, device, jordan_ct_root: str, jordan_mask_r
         with torch.no_grad():
             pred_volume = model.predict_full_volume(ct_tensor, patch_size=pseudo_volume.shape)
         pred_center = pred_volume.squeeze(0).squeeze(0).float().cpu().numpy()[center_index][: mask_2d.shape[0], : mask_2d.shape[1]]
+        display_pred = prepare_display_prediction(pred_center, threshold, use_largest_component, min_size_ratio)
         out_path = os.path.join(out_dir, f"{rank:02d}_dice{row['dice']:.3f}_{row['patient_id']}_slice{row['slice_num']}.png")
-        save_panel(ct_2d, mask_2d, pred_center, threshold, f"Jordan -- {row['patient_id']} slice {row['slice_num']}, dice={row['dice']:.3f}", out_path)
+        save_panel(ct_2d, mask_2d, display_pred, threshold, f"Jordan -- {row['patient_id']} slice {row['slice_num']}, dice={row['dice']:.3f}", out_path)
 
 
 def evaluate_model_full(
     model, device, val_loader, patch_size, jordan_ct_root, jordan_mask_root,
     replication_depth, spatial_multiple, threshold, use_largest_component, label,
+    min_size_ratio: float = 0.0,
 ):
     """Runs the full internal (synthetic) + external (Jordan) full-volume
     evaluation for a given model instance -- shared between the raw-weight
@@ -190,14 +236,14 @@ def evaluate_model_full(
     external_mean, external_std) -- NOT the raw prediction volumes, since
     only the raw-weight pass needs those for visualizations."""
     predictions = compute_synthetic_predictions(model, device, val_loader, patch_size)
-    synthetic_rows = score_predictions(predictions, threshold, use_largest_component=use_largest_component)
+    synthetic_rows = score_predictions(predictions, threshold, use_largest_component=use_largest_component, min_size_ratio=min_size_ratio)
     internal_dices = [r["dice"] for r in synthetic_rows]
     internal_mean, internal_std = float(np.mean(internal_dices)), float(np.std(internal_dices))
     log.info("[%s] INTERNAL (synthetic val, full-volume): %d patients, mean dice=%.4f (std=%.4f)", label, len(synthetic_rows), internal_mean, internal_std)
 
     jordan_rows = evaluate_jordan(
         model, device, jordan_ct_root, jordan_mask_root, replication_depth,
-        spatial_multiple, threshold, use_largest_component=use_largest_component,
+        spatial_multiple, threshold, use_largest_component=use_largest_component, min_size_ratio=min_size_ratio,
     )
     external_dices = [r["dice"] for r in jordan_rows]
     external_mean, external_std = float(np.mean(external_dices)), float(np.std(external_dices))
@@ -283,7 +329,7 @@ def main():
         threshold, searched_mean_dice = find_optimal_threshold(prob_target_pairs, dice_fn=lambda p, t: dice_iou(p, t)[0])
         log.info("--auto_threshold: selected threshold=%.2f (search mean dice=%.4f, raw weights)", threshold, searched_mean_dice)
 
-    synthetic_rows = score_predictions(predictions, threshold, use_largest_component=args.use_largest_component)
+    synthetic_rows = score_predictions(predictions, threshold, use_largest_component=args.use_largest_component, min_size_ratio=args.min_size_ratio)
     write_csv(synthetic_rows, os.path.join(args.output_dir, "internal_synthetic_metrics.csv"))
     internal_dices = [r["dice"] for r in synthetic_rows]
     internal_mean, internal_std = float(np.mean(internal_dices)), float(np.std(internal_dices))
@@ -292,6 +338,7 @@ def main():
     jordan_rows = evaluate_jordan(
         model, device, data_cfg["jordan_ct_root"], data_cfg["jordan_mask_root"], args.replication_depth,
         data_cfg.get("spatial_multiple", 16), threshold, use_largest_component=args.use_largest_component,
+        min_size_ratio=args.min_size_ratio,
     )
     jordan_csv_fields = ["patient_id", "slice_num", "dice", "iou"]
     jordan_csv_path = os.path.join(args.output_dir, "external_jordan_metrics.csv")
@@ -316,6 +363,7 @@ def main():
          ema_internal_mean, ema_internal_std, ema_external_mean, ema_external_std) = evaluate_model_full(
             ema_model, device, val_loader, patch_size, data_cfg["jordan_ct_root"], data_cfg["jordan_mask_root"],
             args.replication_depth, data_cfg.get("spatial_multiple", 16), threshold, args.use_largest_component, "ema",
+            min_size_ratio=args.min_size_ratio,
         )
         write_csv(ema_synthetic_rows, os.path.join(args.output_dir, "internal_synthetic_metrics_ema.csv"))
         with open(os.path.join(args.output_dir, "external_jordan_metrics_ema.csv"), "w", newline="") as f:
@@ -341,10 +389,14 @@ def main():
     for (patient_id, prob_vol, mask_vol), batch in zip(predictions, val_loader):
         ct_vol = batch["ct"].squeeze(0).squeeze(0).numpy()
         predictions_with_ct.append((patient_id, ct_vol, prob_vol, mask_vol))
-    save_synthetic_visualizations_with_ct(predictions_with_ct, synthetic_rows, threshold, args.output_dir, args.num_visualizations)
+    save_synthetic_visualizations_with_ct(
+        predictions_with_ct, synthetic_rows, threshold, args.output_dir, args.num_visualizations,
+        use_largest_component=args.use_largest_component, min_size_ratio=args.min_size_ratio,
+    )
     save_jordan_visualizations(
         model, device, data_cfg["jordan_ct_root"], data_cfg["jordan_mask_root"], jordan_rows,
         args.replication_depth, data_cfg.get("spatial_multiple", 16), threshold, args.output_dir, args.num_visualizations,
+        use_largest_component=args.use_largest_component, min_size_ratio=args.min_size_ratio,
     )
 
     log.info("Done. Full report saved under %s", args.output_dir)

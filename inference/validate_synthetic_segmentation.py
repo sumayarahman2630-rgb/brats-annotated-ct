@@ -69,6 +69,7 @@ def parse_args():
     parser.add_argument("--threshold", type=float, default=0.5, help="Sigmoid threshold for the binary prediction (ignored if --auto_threshold is set).")
     parser.add_argument("--auto_threshold", action="store_true", help="Search for the global threshold maximizing mean Dice on this val set, instead of using --threshold.")
     parser.add_argument("--use_largest_component", action="store_true", help="Keep only the largest connected component of each thresholded prediction.")
+    parser.add_argument("--min_size_ratio", type=float, default=0.0, help="With --use_largest_component: also keep any other component at least this fraction of the largest one's size (default 0.0 -- strict, only the single largest). Use e.g. 0.5 to preserve genuine bilateral/multi-focal disease.")
     parser.add_argument("--output_csv", type=str, default="/kaggle/working/stage3_synthetic_val_metrics.csv")
     return parser.parse_args()
 
@@ -95,15 +96,22 @@ def score_predictions(
     predictions: list[tuple[str, np.ndarray, np.ndarray]],
     threshold: float,
     use_largest_component: bool = False,
+    min_size_ratio: float = 0.0,
 ) -> list[dict]:
     """Threshold + (optionally) largest-connected-component filter +
     Dice/IoU for a set of already-computed (patient_id, prob_vol,
-    mask_vol) predictions."""
+    mask_vol) predictions. `min_size_ratio` is passed straight through to
+    keep_largest_connected_component (default 0.0 -- strict, single
+    largest only) -- must be threaded through consistently wherever
+    use_largest_component is also passed to a visualization/display
+    function scoring the SAME predictions, or the reported number and the
+    displayed mask can disagree (real bug found and fixed 2026-07-25 in
+    inference/generate_full_report.py, before min_size_ratio existed)."""
     rows = []
     for patient_id, prob_vol, mask_vol in predictions:
         pred_bin = (prob_vol > threshold).astype(np.float32)
         if use_largest_component:
-            pred_bin = keep_largest_connected_component(pred_bin)
+            pred_bin = keep_largest_connected_component(pred_bin, min_size_ratio=min_size_ratio)
         dice, iou = dice_iou(pred_bin, mask_vol)
         log.info("%s: dice=%.4f iou=%.4f", patient_id, dice, iou)
         rows.append({"patient_id": patient_id, "dice": dice, "iou": iou})
@@ -171,7 +179,7 @@ def main():
         log.info("Wrote selected threshold to %s -- reuse this as validate_jordan_segmentation.py's --threshold "
                   "(never search a threshold on Jordan directly).", threshold_path)
 
-    rows = score_predictions(predictions, threshold, use_largest_component=args.use_largest_component)
+    rows = score_predictions(predictions, threshold, use_largest_component=args.use_largest_component, min_size_ratio=args.min_size_ratio)
     write_csv(rows, args.output_csv)
 
     dices = [r["dice"] for r in rows]

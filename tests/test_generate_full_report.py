@@ -18,8 +18,49 @@ import yaml
 from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, generate_uid
 
+from inference.generate_full_report import prepare_display_prediction
+from inference.postprocessing import keep_largest_connected_component
+from inference.validate_jordan_segmentation import dice_iou
 from models.unet3d_segmentation import build_segmentation_model
 from training.ema import EMA
+
+
+def test_prepare_display_prediction_matches_score_predictions_post_processing():
+    """Real bug found 2026-07-25: a real report run with
+    --use_largest_component showed an unchanged prediction/dice for a
+    two-blob (two-hemisphere) case, because the visualization always
+    displayed the raw probability thresholded fresh, ignoring
+    use_largest_component entirely -- the CSV's dice (via
+    score_predictions) reflected post-processing, but the image never
+    did. This directly confirms prepare_display_prediction (what
+    visualizations now use) produces the EXACT same filtered array that
+    dice_iou would score for use_largest_component -- i.e. the number in
+    the title and the pixels shown can no longer disagree."""
+    prob = np.zeros((16, 16, 16), dtype=np.float32)
+    prob[2:4, 2:4, 2:4] = 0.9      # small, spurious blob -- 8 voxels
+    prob[10:16, 10:16, 10:16] = 0.9  # large, real blob -- 216 voxels
+    target = np.zeros((16, 16, 16), dtype=np.float32)
+    target[10:16, 10:16, 10:16] = 1.0
+    threshold = 0.5
+
+    # Without post-processing: the raw thresholded prediction is unchanged either way.
+    unfiltered = prepare_display_prediction(prob, threshold, use_largest_component=False)
+    np.testing.assert_array_equal(unfiltered, prob)
+
+    # With post-processing: the displayed mask must be IDENTICAL to what score_predictions
+    # would have scored -- both derived from the same keep_largest_connected_component call.
+    displayed = prepare_display_prediction(prob, threshold, use_largest_component=True)
+    expected = keep_largest_connected_component((prob > threshold).astype(np.float32))
+    np.testing.assert_array_equal(displayed, expected)
+    assert displayed.sum() == 216  # small blob genuinely gone from what's displayed
+    assert displayed[2:4, 2:4, 2:4].sum() == 0
+
+    # And the dice this filtered mask would score matches what score_predictions computes
+    # for the exact same input -- confirming display and CSV are the same number.
+    displayed_dice, _iou = dice_iou(displayed, target)
+    csv_style_pred = keep_largest_connected_component((prob > threshold).astype(np.float32))
+    csv_dice, _iou = dice_iou(csv_style_pred, target)
+    assert displayed_dice == csv_dice
 
 
 def _write_fake_synthetic_ct_patient(root, patient_id, shape=(24, 24, 24)):
