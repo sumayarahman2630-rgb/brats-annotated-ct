@@ -135,18 +135,11 @@ docstring for why (8-bit windowed RGB DICOM with no real HU values, only
 1-6 slices per patient instead of a full volume) before treating it as
 directly comparable to the internal number.
 
-I also tried a wavelet-diffusion model for Stage 1 before settling on the
-regression U-Net above:
-
-| Model | Foreground PSNR (mean, 18 held-out val patients) |
-|---|---:|
-| **Regression U-Net (active)** | **28.92 dB** |
-| Wavelet diffusion (archived) | ~9 dB, undertrained given the available compute budget |
-
-See [`PROJECT_NOTES.md`](PROJECT_NOTES.md) for the full development
-narrative -- what was tried, what broke, and why -- and
-[`archive/README.md`](archive/README.md) for why the diffusion approach
-was kept, not deleted.
+I tried a wavelet-diffusion model for Stage 1 before settling on the
+regression U-Net above; it reached only ~9 dB foreground PSNR, undertrained
+given the available compute budget, and was dropped in favor of the
+regression approach. See [`PROJECT_NOTES.md`](PROJECT_NOTES.md) for the
+full development narrative -- what was tried, what broke, and why.
 
 ## Project Structure
 
@@ -202,7 +195,6 @@ Hospital that was never used in training.
 - [`training/ema.py`](training/ema.py) -- exponential moving average (saved for reference; raw weights are what's actually evaluated everywhere)
 - [`tests/`](tests) -- CPU-only test suite covering all three stages
 - [`analysis/`](analysis) -- figure/table generation from real training logs and checkpoints (see below)
-- [`archive/`](archive) -- the original wavelet-diffusion approach for Stage 1, kept for the record (see [archive/README.md](archive/README.md) for why it was replaced)
 
 ## Pipeline
 

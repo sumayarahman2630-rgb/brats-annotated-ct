@@ -6,11 +6,8 @@ throughout this project's development (see PROJECT_NOTES.md for the narrative
 version of each finding).
 
 Covers the **active regression pipeline** (the one that actually reached a
-good result: 28.21 dB foreground PSNR) plus the shared preprocessing/data
-modules both pipelines use. The original wavelet-diffusion pipeline's own
-tests moved to `archive/tests/` alongside the code they test -- see
-`archive/README.md` -- they are frozen, not part of this suite, and not
-run by the commands below.
+good result: 28.92 dB mean foreground PSNR across the 18 held-out
+validation patients) plus the shared preprocessing/data modules it uses.
 
 Run everything:
 ```
@@ -59,8 +56,9 @@ python -m pytest tests/ -v -m "not slow"
 ## What's NOT covered here (needs a GPU / real data)
 
 - Actual training convergence/loss trajectory on real SynthRAD data (though
-  the regression pipeline's real result -- 28.21 dB foreground PSNR at step
-  20000 -- is documented in PROJECT_NOTES.md and the main README).
+  the regression pipeline's real result -- 28.92 dB mean foreground PSNR
+  across the 18 held-out validation patients -- is documented in
+  PROJECT_NOTES.md and the main README).
 - Real memory/OOM behavior at production model/volume size on a real GPU
   beyond what's already been hit and fixed once (see PROJECT_NOTES.md).
 - The image-orientation-consistency question raised in round 8 -- checked
