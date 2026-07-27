@@ -1,5 +1,12 @@
-"""Dataset for BraTS T1 MRI volumes + their tumor segmentation masks, used
-by Stage 2 (synthetic CT generation).
+"""STAGE 2 (synthetic CT dataset generation) -- the input side.
+
+Input: BraTS 2020 T1 MRI volumes and their expert tumor segmentation
+masks. Output: preprocessed T1 tensors ready to feed the Stage 1
+checkpoint, plus everything needed to place the resulting synthetic CT
+back into the original BraTS grid alongside its (unmodified) tumor mask.
+This is the T1-only half of Stage 2 -- see
+inference/run_stage2_brats_regression.py for where the Stage 1 model
+actually gets called and the synthetic CT/mask pair gets written out.
 
 Discovery groups files by patient ID *extracted from the filename itself*
 (e.g. "BraTS20_Training_001" from "BraTS20_Training_001_t1.nii.gz"), not by
@@ -111,12 +118,14 @@ class BraTSVolumeDataset(Dataset):
         spatial_multiple: int = 16,
         crop_margin: int = 10,
     ):
+        """Stores the preprocessing settings -- no I/O happens until __getitem__ is called."""
         self.patients = patients
         self.target_spacing = target_spacing
         self.spatial_multiple = spatial_multiple
         self.crop_margin = crop_margin
 
     def __len__(self) -> int:
+        """Number of discovered patients."""
         return len(self.patients)
 
     def __getitem__(self, idx: int) -> dict:

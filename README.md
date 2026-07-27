@@ -1,42 +1,166 @@
 # brats-annotated-ct
 
-Synthetic, tumor-annotated CT dataset generation from brain MRI, for
-domains where real annotated CT is scarce.
+Real annotated CT of brain tumors is hard to get in bulk -- hospitals hold
+it under strict access controls, and public datasets with both a CT volume
+and a matching tumor mask are rare. This project builds one anyway, by
+learning to translate MRI into CT and then running that translation over
+a large public MRI-plus-tumor-mask dataset (BraTS) that would otherwise be
+unusable for CT-based work. The result is a three-stage pipeline: Stage 1
+trains an MRI-to-CT model on real paired scans, Stage 2 uses that model to
+generate a synthetic, tumor-annotated CT dataset from BraTS, and Stage 3
+trains a CT tumor segmentation model on that synthetic dataset and checks
+how well it holds up against a small set of real hospital CT scans it
+never saw during training.
 
-## What this project does
+## Project Structure
 
-Three-stage pipeline:
+### Stage 1 -- MRI-to-CT translation
 
-1. **Stage 1 — MRI → CT translation**, trained on the full SynthRAD2023
-   brain cohort (180 patients, paired real MRI/CT). A model learns to
-   predict a CT volume from an MRI volume alone.
-2. **Stage 2 — synthetic CT dataset generation**, applying the Stage 1
-   model to BraTS2020 T1 MRI volumes (369 patients). Each generated CT is
-   paired with its source BraTS tumor segmentation mask, under a clear
-   `<patient_id>/synthetic_ct.nii.gz` + `<patient_id>/tumor_mask.nii.gz`
-   convention. **This is the core deliverable** — annotated synthetic CT
-   for tumor-region work.
-3. **Stage 3 — CT tumor segmentation**, training a binary segmentation
-   model on the Stage 2 output (synthetic CT + tumor mask, binarized from
-   BraTS's multi-class labels), then externally validating it against a
-   small real-CT dataset (Jordan University Hospital, 20 patients) that
-   was never used in training. See PROJECT_NOTES.md's Stage 3 section for
-   the real, load-bearing limitations of that external comparison (format
-   mismatch, incomplete volumes, unverified filename matching) before
-   trusting its numbers.
+Trains a 3D regression U-Net on the SynthRAD2023 brain cohort (paired real
+MRI/CT) to predict a CT volume directly from an MRI volume.
 
-## Result
+- [`models/unet3d_regression.py`](models/unet3d_regression.py) -- the model
+- [`configs/stage1_regression.yaml`](configs/stage1_regression.yaml) -- hyperparameters and data paths
+- [`training/train_stage1_regression.py`](training/train_stage1_regression.py) -- the training loop
+- [`data/loaders_synthrad.py`](data/loaders_synthrad.py) -- SynthRAD2023 dataset
+- [`inference/visualize_regression_val.py`](inference/visualize_regression_val.py) -- PSNR/SSIM + comparison images on the held-out validation split
 
-Two architectures were tried for Stage 1. The active pipeline (below) is
-the one that reached a genuinely good result:
+### Stage 2 -- synthetic annotated CT dataset generation
 
-| Model | Foreground PSNR (val, unseen patients) | Notes |
-|---|---:|---|
-| **Regression U-Net (active)** | **28.21 dB** | L1 loss, direct prediction, 20000 training steps |
-| Wavelet diffusion (archived) | ~9 dB | DDPM, undertrained given the available compute budget |
+Applies the trained Stage 1 model to BraTS2020 T1 MRI volumes and pairs
+each generated CT with its source BraTS tumor mask. **This is the core
+deliverable** -- annotated synthetic CT for tumor-region work where real
+annotated CT is scarce.
 
-See [`PROJECT_NOTES.md`](PROJECT_NOTES.md) for the full development narrative — what was
-tried, what broke, and why the simpler model won — and
+- [`data/loaders_brats.py`](data/loaders_brats.py) -- BraTS2020 T1 MRI + tumor mask loader (the input side)
+- [`inference/run_stage2_brats_regression.py`](inference/run_stage2_brats_regression.py) -- runs the Stage 1 checkpoint over BraTS and writes the dataset
+- [`configs/stage2_inference_brats_regression.yaml`](configs/stage2_inference_brats_regression.yaml) -- generation settings
+
+Output convention: one folder per patient under the configured
+`output_dir`, containing `synthetic_ct.nii.gz` and `tumor_mask.nii.gz`,
+plus a generated `manifest.csv`, `metadata.json`, and `README.md` dataset
+card.
+
+### Stage 3 -- CT tumor segmentation
+
+Trains a binary segmentation model on the Stage 2 output (synthetic CT +
+tumor mask, binarized from BraTS's multi-class labels), then externally
+validates it against a small real-CT dataset from Jordan University
+Hospital that was never used in training.
+
+- [`models/unet3d_segmentation.py`](models/unet3d_segmentation.py) -- the model (same U-Net topology as Stage 1, raw logit output)
+- [`configs/stage3_ct_segmentation.yaml`](configs/stage3_ct_segmentation.yaml) -- hyperparameters and dataset paths
+- [`training/train_stage3_segmentation.py`](training/train_stage3_segmentation.py) -- the training loop
+- [`data/loaders_synthetic_ct.py`](data/loaders_synthetic_ct.py) -- Stage 2 output loader (the only data Stage 3 trains on)
+- [`data/loaders_jordan_ct.py`](data/loaders_jordan_ct.py) -- Jordan Hospital DICOM loader (external validation only, never touched by training)
+- [`inference/validate_synthetic_segmentation.py`](inference/validate_synthetic_segmentation.py) -- official internal Dice/IoU (full-volume, on the synthetic validation split)
+- [`inference/validate_jordan_segmentation.py`](inference/validate_jordan_segmentation.py) -- external Dice/IoU against real Jordan CT
+- [`inference/visualize_predictions.py`](inference/visualize_predictions.py) -- per-patient prediction panels, both sources
+- [`inference/postprocessing.py`](inference/postprocessing.py) -- optional largest-component filtering + threshold search, shared by the two validation scripts
+- [`inference/generate_full_report.py`](inference/generate_full_report.py) -- runs all of the above in one command after training finishes
+
+### Shared across every stage
+
+- [`data/preprocessing.py`](data/preprocessing.py) -- HU/MRI normalization, resampling, cropping/padding, patch cropping and augmentation
+- [`training/checkpoint.py`](training/checkpoint.py) -- checkpoint save/load/resume
+- [`training/ema.py`](training/ema.py) -- exponential moving average (saved for reference; raw weights are what's actually evaluated everywhere)
+- [`tests/`](tests) -- CPU-only test suite covering all three stages
+- [`analysis/`](analysis) -- figure/table generation from real training logs and checkpoints (see below)
+- [`archive/`](archive) -- the original wavelet-diffusion approach for Stage 1, kept for the record (see [archive/README.md](archive/README.md) for why it was replaced)
+
+## How to Run
+
+Everything below assumes a Kaggle GPU session with the SynthRAD2023 and
+BraTS2020 datasets mounted (see [`PROJECT_NOTES.md`](PROJECT_NOTES.md)'s
+"Kaggle dataset paths" for the exact confirmed input paths).
+
+**Stage 1 -- train the MRI-to-CT model** (smoke-test first):
+```bash
+python -m training.train_stage1_regression --config configs/stage1_regression.yaml --max_steps 100 --max_patients 3
+python -m training.train_stage1_regression --config configs/stage1_regression.yaml
+```
+
+Check validation quality (PSNR/SSIM + comparison images on held-out patients):
+```bash
+python -m inference.visualize_regression_val --config configs/stage1_regression.yaml
+```
+
+**Stage 2 -- generate the annotated synthetic CT dataset** (smoke-test with `--limit` first):
+```bash
+python -m inference.run_stage2_brats_regression --config configs/stage2_inference_brats_regression.yaml --limit 3
+python -m inference.run_stage2_brats_regression --config configs/stage2_inference_brats_regression.yaml
+```
+
+**Stage 3 -- train the segmentation model on the Stage 2 output** (smoke-test first):
+```bash
+python -m training.train_stage3_segmentation --config configs/stage3_ct_segmentation.yaml --max_steps 100 --max_patients 3
+python -m training.train_stage3_segmentation --config configs/stage3_ct_segmentation.yaml
+```
+
+Get the official internal Dice/IoU (full-volume, entire synthetic
+validation split -- not the cheap patch-level number training logs
+periodically):
+```bash
+python -m inference.validate_synthetic_segmentation --config configs/stage3_ct_segmentation.yaml
+```
+
+Validate against the Jordan external dataset (never used in training):
+```bash
+python -m inference.validate_jordan_segmentation --config configs/stage3_ct_segmentation.yaml
+```
+
+Or generate everything above in one run once training finishes (training
+curves, internal + external Dice/IoU, an EMA side-by-side comparison, and
+example prediction images):
+```bash
+python -m inference.generate_full_report --config configs/stage3_ct_segmentation.yaml
+```
+
+**Figures** (once training/validation has produced real data):
+```bash
+python -m analysis.plot_validation_psnr_curve --config configs/stage1_regression.yaml
+python -m analysis.generate_val_metrics_table --config configs/stage1_regression.yaml
+python -m analysis.plot_psnr_ssim_distribution --metrics_csv /kaggle/working/analysis_plots/val_metrics.csv
+python -m analysis.plot_psnr_vs_ssim_scatter --metrics_csv /kaggle/working/analysis_plots/val_metrics.csv
+```
+
+**Test suite** (CPU-only, no GPU or real data needed):
+```bash
+pip install -r requirements.txt
+python -m pytest tests/
+```
+
+## Results Summary
+
+| Stage | Metric | Value |
+|---|---|---|
+| Stage 1 (MRI-to-CT) | Foreground PSNR, held-out validation patients | **28.21 dB** (step 20000, raw weights) |
+| Stage 2 (dataset generation) | Synthetic CT + tumor mask pairs generated | **365 patients** (from BraTS2020) |
+| Stage 3 (segmentation), external | Dice, Jordan Hospital CT (real, never trained on) | **0.1987** (most recently measured checkpoint, focal loss, alpha=0.75) |
+
+Two notes on how to read the Stage 3 row: the internal metric (full-volume
+Dice on the synthetic validation split, produced by
+`validate_synthetic_segmentation.py`) has gone through several
+loss-function and checkpoint iterations documented in
+[`PROJECT_NOTES.md`](PROJECT_NOTES.md), and the current run's number
+should be regenerated with the command above rather than assumed stable
+across retrains. And the Jordan number reflects a genuinely different,
+harder comparison than the internal one -- see
+[`data/loaders_jordan_ct.py`](data/loaders_jordan_ct.py)'s module
+docstring for why (8-bit windowed RGB DICOM with no real HU values, only
+1-6 slices per patient instead of a full volume) before treating it as
+directly comparable to the internal number.
+
+Two Stage 1 architectures were tried; the regression U-Net above is the
+one that reached a usable result:
+
+| Model | Foreground PSNR (val, unseen patients) |
+|---|---:|
+| **Regression U-Net (active)** | **28.21 dB** |
+| Wavelet diffusion (archived) | ~9 dB, undertrained given the available compute budget |
+
+See [`PROJECT_NOTES.md`](PROJECT_NOTES.md) for the full development
+narrative -- what was tried, what broke, and why -- and
 [`archive/README.md`](archive/README.md) for why the diffusion approach
 was kept, not deleted.
 
@@ -58,7 +182,7 @@ SynthRAD2023 MRI + CT (paired, real)
   synthetic CT, paired with the original BraTS tumor mask
         │
         ▼
-  synthetic_ct_dataset_regression/  (the core deliverable)
+  synthetic_ct_dataset_regression/  (365 patients -- the core deliverable)
         │
         ▼
   train Stage 3 segmentation U-Net (binarized tumor mask as target)
@@ -69,132 +193,36 @@ SynthRAD2023 MRI + CT (paired, real)
                 external validation -- see PROJECT_NOTES.md for caveats
 ```
 
-## How to run
-
-Everything below assumes a Kaggle GPU session with the SynthRAD2023 and
-BraTS2020 datasets mounted (see `PROJECT_NOTES.md`'s "Kaggle dataset paths" for
-the exact confirmed input paths).
-
-**1. Train Stage 1** (smoke-test first, same pattern for any new config):
-```bash
-python -m training.train_stage1_regression --config configs/stage1_regression.yaml --max_steps 100 --max_patients 3
-python -m training.train_stage1_regression --config configs/stage1_regression.yaml
-```
-
-**2. Check validation quality** (PSNR/SSIM + comparison images on held-out patients):
-```bash
-python -m inference.visualize_regression_val --config configs/stage1_regression.yaml
-```
-
-**3. Generate the BraTS dataset** (smoke-test with `--limit` first):
-```bash
-python -m inference.run_stage2_brats_regression --config configs/stage2_inference_brats_regression.yaml --limit 3
-python -m inference.run_stage2_brats_regression --config configs/stage2_inference_brats_regression.yaml
-```
-
-**4. Generate figures** (see `analysis/` below) once training/validation has produced real data:
-```bash
-python -m analysis.plot_validation_psnr_curve --config configs/stage1_regression.yaml
-python -m analysis.generate_val_metrics_table --config configs/stage1_regression.yaml
-python -m analysis.plot_psnr_ssim_distribution --metrics_csv /kaggle/working/analysis_plots/val_metrics.csv
-python -m analysis.plot_psnr_vs_ssim_scatter --metrics_csv /kaggle/working/analysis_plots/val_metrics.csv
-```
-
-**5. Train Stage 3** (segmentation, on the Stage 2 output -- smoke-test first):
-```bash
-python -m training.train_stage3_segmentation --config configs/stage3_ct_segmentation.yaml --max_steps 100 --max_patients 3
-python -m training.train_stage3_segmentation --config configs/stage3_ct_segmentation.yaml
-```
-
-**6. Validate Stage 3 against the Jordan external dataset** (never used in training):
-```bash
-python -m inference.validate_jordan_segmentation --config configs/stage3_ct_segmentation.yaml
-```
-
-**7. Get the official, citable Stage 3 Dice/IoU** (full-volume sliding-window inference over the entire synthetic validation split -- NOT the cheap patch-level number training logs periodically):
-```bash
-python -m inference.validate_synthetic_segmentation --config configs/stage3_ct_segmentation.yaml
-```
-
-**8. Visualize Stage 3 predictions** (per-patient CT / real mask / predicted mask panels, on both the synthetic validation split and Jordan):
-```bash
-python -m inference.visualize_predictions --config configs/stage3_ct_segmentation.yaml --source both --num_patients 5
-```
-
-**9. Generate the full Stage 3 report in one run** (training curves, internal + external Dice/IoU CSVs, a side-by-side EMA-weight comparison, optional literature comparison chart, and best-to-worst example visualizations for both sources -- everything steps 6-8 produce individually, plus the training curve, in one command after training finishes):
-```bash
-python -m inference.generate_full_report --config configs/stage3_ct_segmentation.yaml \
-    --auto_threshold --use_largest_component \
-    --comparison_label "Author et al. (Year)" --comparison_internal_dice 0.XX --comparison_external_dice 0.XX
-```
-`--comparison_*` args are optional and never fabricated by the script -- omit them (or the comparison chart is skipped) unless you have the real reported numbers to compare against. `--auto_threshold` searches for the best global threshold on the synthetic validation set only (never on Jordan) and reuses it for both reported metrics; `--use_largest_component` keeps only the largest connected component of each thresholded prediction, applied identically to the reported CSV dice AND the example visualizations (they used to disagree -- see PROJECT_NOTES.md's 2026-07-25 follow-up). Add `--min_size_ratio 0.5` (or similar) alongside `--use_largest_component` to also keep any other component at least that fraction of the largest one's size, instead of strictly the single largest -- useful for genuine bilateral/multi-focal disease that would otherwise be incorrectly discarded. All three are optional, off by default (plain threshold=0.5, no filtering) if omitted. An EMA-weight evaluation (internal + external, same threshold/post-processing, separate CSVs suffixed `_ema`) runs alongside the raw-weight one by default -- purely informational, since raw weights remain what visualizations and the comparison chart use (this project's established anti-EMA-contamination convention); pass `--skip_ema_eval` to omit it.
-
-Run the test suite (CPU-only, no GPU/real data needed):
-```bash
-pip install -r requirements.txt
-python -m pytest tests/
-```
-
-## Repo structure
-
-```
-models/unet3d_regression.py           Stage 1 model: plain 3D regression U-Net
-models/unet3d_segmentation.py         Stage 3 model: same U-Net topology, raw logit output (sigmoid applied by the caller, for autocast safety)
-configs/stage1_regression.yaml        Stage 1 hyperparameters
-configs/stage2_inference_brats_regression.yaml   Stage 2 settings
-configs/stage3_ct_segmentation.yaml   Stage 3 hyperparameters + dataset paths (synthetic CT + Jordan)
-training/train_stage1_regression.py   Stage 1 training loop (resumable)
-training/train_stage3_segmentation.py Stage 3 training loop (resumable, Dice+BCE loss, synthetic CT only)
-training/checkpoint.py                shared checkpoint save/load/resume
-training/ema.py                       shared exponential moving average
-inference/visualize_regression_val.py Stage 1 validation: PSNR/SSIM + comparison images
-inference/run_stage2_brats_regression.py   Stage 2: generate the BraTS synthetic-CT dataset
-inference/validate_jordan_segmentation.py  Stage 3 external validation against real Jordan CT
-inference/validate_synthetic_segmentation.py  Stage 3 official full-volume Dice/IoU on the synthetic validation split (not the periodic patch-level training metric)
-inference/visualize_predictions.py    Stage 3 per-patient prediction visualization (CT/real mask/predicted mask), both synthetic val + Jordan
-inference/postprocessing.py           shared Stage 3 post-processing: largest-connected-component filtering, validation-set threshold search
-inference/generate_full_report.py     runs everything above in one command after training finishes (curves + both Dice/IoU CSVs + comparison chart + example visualizations)
-data/preprocessing.py                 shared HU/MRI normalization, resample, brain-mask, crop/pad, foreground-biased patch crop
-data/loaders_synthrad.py              SynthRAD2023 dataset (Stage 1 training data)
-data/loaders_brats.py                 BraTS2020 dataset (Stage 2 input data)
-data/loaders_synthetic_ct.py          Stage 2 output dataset (Stage 3 training data)
-data/loaders_jordan_ct.py             Jordan Hospital DICOM dataset (Stage 3 external validation only)
-analysis/                             reusable figure/table-generation scripts (see below)
-scripts/check_orientation_consistency.py   diagnostic: NIfTI orientation consistency check
-tests/                                CPU-only test suite for the active pipeline
-archive/                              the original wavelet-diffusion pipeline (superseded, not deleted)
-PROJECT_NOTES.md                      full development narrative, decisions, and status log
-```
-
 ### `analysis/`
 
 Scripts that turn training/validation output into figures and tables,
 reading real data (training logs, checkpoints) rather than hardcoded
 numbers wherever practical:
 
-- `plot_validation_psnr_curve.py` — validation PSNR vs. training step, from
+- `plot_validation_psnr_curve.py` -- validation PSNR vs. training step, from
   the training log CSV.
-- `generate_val_metrics_table.py` — runs the checkpoint over the full
+- `generate_val_metrics_table.py` -- runs the checkpoint over the full
   validation split, writes a per-patient PSNR/SSIM/L1 CSV, and prints a
   summary table. The other two scripts below consume this CSV rather than
   recomputing it.
-- `plot_psnr_ssim_distribution.py` — box plots of the PSNR/SSIM
+- `plot_psnr_ssim_distribution.py` -- box plots of the PSNR/SSIM
   distributions with individual patient points overlaid.
-- `plot_psnr_vs_ssim_scatter.py` — PSNR vs. SSIM per patient, color-coded
+- `plot_psnr_vs_ssim_scatter.py` -- PSNR vs. SSIM per patient, color-coded
   by PSNR.
 
 Every script's input/output paths are CLI arguments (`--config`,
-`--log_file`, `--metrics_csv`, `--output`, ...) — no hardcoded paths.
+`--log_file`, `--metrics_csv`, `--output`, ...) -- no hardcoded paths.
 
 ## Data sources
 
 - [SynthRAD2023](https://synthrad2023.grand-challenge.org/) brain cohort
-  (paired MRI/CT) — Stage 1 training data.
+  (paired MRI/CT) -- Stage 1 training data.
 - [BraTS2020](https://www.med.upenn.edu/cbica/brats2020/) training set
-  (T1 MRI + tumor segmentation) — Stage 2 input data.
-- Jordan University Hospital CT + tumor mask (20 patients, DICOM) — Stage 3
-  external validation only, never used in training. See PROJECT_NOTES.md's
-  Stage 3 section for this dataset's format and known limitations.
+  (T1 MRI + tumor segmentation) -- Stage 2 input data.
+- Jordan University Hospital CT + tumor mask (20 patients, DICOM) -- Stage 3
+  external validation only, never used in training. See
+  [`PROJECT_NOTES.md`](PROJECT_NOTES.md)'s Stage 3 section for this
+  dataset's format and known limitations.
 
-See `PROJECT_NOTES.md`'s "Kaggle dataset paths" section for the exact confirmed
-Kaggle input paths used during development.
+See [`PROJECT_NOTES.md`](PROJECT_NOTES.md)'s "Kaggle dataset paths" section
+for the exact confirmed Kaggle input paths used during development.

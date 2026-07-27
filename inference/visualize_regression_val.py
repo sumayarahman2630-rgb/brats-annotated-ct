@@ -1,7 +1,11 @@
-"""Pipeline role: the qualitative + quantitative evidence for the regression
-model's result (28.21 dB foreground PSNR at step 20000) -- real vs.
-synthetic CT on the FULL held-out validation split, with an error map.
-Reuses the exact same patient-level split algorithm as
+"""STAGE 1 (MRI-to-CT translation) -- validation report.
+
+Input: the trained Stage 1 checkpoint and its held-out validation split.
+Output: a PSNR/SSIM number for every val patient (whole-volume and
+foreground-only) plus a 4-panel comparison image (input MRI / real CT /
+synthetic CT / error map) per patient -- the qualitative and quantitative
+evidence for the regression model's result (28.21 dB foreground PSNR at
+step 20000). Reuses the exact same patient-level split algorithm as
 training/train_stage1_regression.py (same config, same seed) so this is
 guaranteed to score only patients the model never trained on.
 

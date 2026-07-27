@@ -1,8 +1,10 @@
-"""External validation of the Stage 3 segmentation checkpoint against the
-Jordan University Hospital dataset -- real CT, real tumor annotations,
-never seen during training. Also produces a quick visualization comparing
-one synthetic (training-distribution) example against one Jordan
-(external) example side by side.
+"""STAGE 3 (CT tumor segmentation) -- external validation metrics.
+
+Input: a trained Stage 3 checkpoint and the Jordan University Hospital
+dataset (real CT, real tumor annotations, never seen during training).
+Output: per-slice Dice/IoU (CSV), the mean/std across all matched slices,
+and a side-by-side visualization comparing one synthetic (training-
+distribution) example against one Jordan (external) example.
 
 Read PROJECT_NOTES.md's Stage 3 section before trusting these numbers as
 more than a rough signal -- three of this script's own design choices are
@@ -197,6 +199,9 @@ def save_visualization(model, device, val_loader, jordan_ct_root: str, jordan_ma
 
 
 def main():
+    """Load the checkpoint (raw weights), score every matched Jordan slice,
+    write per-slice Dice/IoU to CSV, and save the side-by-side comparison
+    image against one synthetic validation example."""
     args = parse_args()
     with open(args.config) as f:
         config = yaml.safe_load(f)

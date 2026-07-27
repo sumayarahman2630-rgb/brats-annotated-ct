@@ -1,5 +1,11 @@
-"""Single entry point that produces the full post-training Stage 3 report
-in one run, so nothing needs to be requested/run individually after a
+"""STAGE 3 (CT tumor segmentation) -- the full post-training report.
+
+Input: a trained Stage 3 checkpoint, its training log, the synthetic
+validation split, and the Jordan external dataset. Output: everything a
+supervisor would want to see about one checkpoint in a single folder --
+training curves, internal + external Dice/IoU (raw and, informationally,
+EMA), an optional literature comparison chart, and example prediction
+images -- so nothing needs to be requested/run individually after a
 training session finishes:
 
 1. Training loss/Dice curve (train + val, the whole run), read from
@@ -59,6 +65,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 
 def parse_args():
+    """CLI flags -- config path plus every knob the report supports
+    (thresholding, post-processing, visualization count, the optional
+    literature comparison, and whether to skip the EMA side-by-side pass)."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", type=str, default="configs/stage3_ct_segmentation.yaml")
     parser.add_argument("--checkpoint_path", type=str, default=None, help="Use this exact checkpoint instead of auto-finding the latest one.")
@@ -286,6 +295,10 @@ def save_comparison_chart(internal_dice: float, external_dice: float, comparison
 
 
 def main():
+    """Run every piece of the report in sequence -- training curves, raw-
+    weight internal/external Dice, the optional EMA side-by-side pass, the
+    optional literature comparison chart, and example visualizations --
+    saving everything under --output_dir."""
     args = parse_args()
     with open(args.config) as f:
         config = yaml.safe_load(f)

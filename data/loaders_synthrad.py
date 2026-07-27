@@ -1,20 +1,23 @@
-"""Pipeline role: the Stage 1 training data source -- discovers SynthRAD2023
-brain patients, preprocesses each MRI/CT/mask triple (resample, brain-mask,
-crop, normalize, pad), and builds the train/val DataLoaders every Stage 1
-training script (the active regression one and the archived diffusion one)
-consumes identically. This is the one place patient-level train/val
-splitting happens, so it's worth reading build_synthrad_dataloaders's
-docstring below before touching it.
+"""STAGE 1 (MRI-to-CT translation) -- the training data source.
+
+Input: raw SynthRAD2023 brain patient folders (paired MRI/CT/brain-mask
+NIfTI files). Output: train/val PyTorch DataLoaders yielding preprocessed
+(mri, ct, mask) tensor triples. Both the active regression training
+script and the archived diffusion one consume this identically. This is
+also the one place patient-level train/val splitting happens for Stage
+1 -- worth reading build_synthrad_dataloaders's docstring before
+touching it, since getting that split wrong silently invalidates every
+validation number downstream.
 
 Confirmed exact layout (2026-07-15): every immediate subfolder of
 data.synthrad_root (.../synthrad-2023/Task1/brain) is either a patient
 folder containing ct.nii, mask.nii, mr.nii, or a non-patient folder like
-"overview" that Kaggle copies alongside the patient data. `discover_
-synthrad_patients` qualifies a folder as a patient by *content* -- it
-actually contains all three required files -- rather than by excluding
-known non-patient names. That's deliberately more robust than a name
-denylist: any other stray folder that shows up in a future dataset version
-gets excluded the same way "overview" is, with no code change needed.
+"overview" that Kaggle copies alongside the patient data.
+discover_synthrad_patients decides a folder is a patient by checking it
+actually has all three files, rather than keeping a list of known
+non-patient names to exclude -- that way, any other stray folder that
+shows up in a future dataset version gets skipped the same way
+"overview" is, without anyone having to remember to update a denylist.
 """
 from __future__ import annotations
 
@@ -134,6 +137,7 @@ class SynthRADBrainDataset(Dataset):
         cache_dir: str | None = None,
         seed: int = 0,
     ):
+        """Stores the preprocessing settings and creates the cache directory if one was given."""
         self.patients = patients
         self.target_spacing = target_spacing
         self.ct_clip_range = ct_clip_range
@@ -147,6 +151,7 @@ class SynthRADBrainDataset(Dataset):
         self._rng = np.random.default_rng(seed)
 
     def __len__(self) -> int:
+        """Number of patients in this split."""
         return len(self.patients)
 
     def _load_and_preprocess(self, patient: SynthRADPatient) -> dict[str, np.ndarray]:

@@ -1,14 +1,17 @@
-"""Pipeline role: the model at the center of the active pipeline -- a plain
-3D regression U-Net for direct MRI -> CT translation (encoder-decoder with
-skip connections, L1 loss computed by the caller), no diffusion/timestep
-conditioning at all. Deliberately much simpler than the archived wavelet
-diffusion model (no attention, no FiLM timestep embedding, no wavelet
-transform), and empirically the better result: 28.21 dB foreground PSNR on
-held-out validation patients at step 20000, vastly ahead of the diffusion
-checkpoint's ~9 dB (see PROJECT_NOTES.md and the main README for the comparison).
-No shared code with the archived models -- same pipeline-isolation
-reasoning throughout this project: a bug here can't affect archived code,
-and vice versa.
+"""STAGE 1 (MRI-to-CT translation) -- the model.
+
+Input: a single-channel MRI volume, normalized to [-1, 1]. Output: a
+single-channel synthetic CT volume in the same scale. This is a plain 3D
+regression U-Net (encoder-decoder with skip connections, L1 loss computed
+by the caller) -- no diffusion, no timestep conditioning, nothing fancy.
+It's deliberately simpler than the archived wavelet diffusion model (no
+attention, no FiLM timestep embedding, no wavelet transform) and it beat
+it by a wide margin anyway: 28.21 dB foreground PSNR on held-out
+validation patients at step 20000, versus the diffusion checkpoint's
+~9 dB (see PROJECT_NOTES.md and the main README for the full comparison).
+No code is shared with the archived models on purpose -- if something
+breaks here, it can't take the archived version down with it, and vice
+versa.
 """
 from __future__ import annotations
 

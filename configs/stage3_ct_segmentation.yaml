@@ -1,10 +1,16 @@
-# Stage 3 (CT -> binary tumor segmentation) config. Trains ONLY on the
-# synthetic CT + tumor mask pairs Stage 2 generated (data.synthetic_ct_root)
-# -- the Jordan hospital dataset (data.jordan_ct_root / jordan_mask_root)
-# is external validation only, read by inference/validate_jordan_segmentation.py,
-# and is never touched by training/train_stage3_segmentation.py. See
-# PROJECT_NOTES.md's Stage 3 section for the full reasoning and the known
-# limitations of the Jordan comparison.
+# STAGE 3 (CT tumor segmentation) -- config.
+#
+# Input: the synthetic CT + tumor mask pairs Stage 2 generated. Output:
+# settings for training/train_stage3_segmentation.py, and the checkpoint/
+# data paths every Stage 3 evaluation script (validate_synthetic_segmentation.py,
+# validate_jordan_segmentation.py, generate_full_report.py) reads from.
+#
+# Trains ONLY on data.synthetic_ct_root -- the Jordan hospital dataset
+# (data.jordan_ct_root / jordan_mask_root) is external validation only,
+# read by inference/validate_jordan_segmentation.py, and is never touched
+# by training/train_stage3_segmentation.py. See PROJECT_NOTES.md's Stage 3
+# section for the full reasoning and the known limitations of the Jordan
+# comparison.
 
 seed: 42
 

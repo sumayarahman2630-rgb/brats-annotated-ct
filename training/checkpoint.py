@@ -1,11 +1,13 @@
-"""Checkpoint save/find/load, shared by training (resume) and inference
-(load whatever Stage 1 checkpoint currently exists). See PROJECT_NOTES.md's
-"Resumability strategy" section for why this is structured this way --
-short version: numbered-by-step files are the source of truth for "which
-checkpoint is newest" (both within one Kaggle session and across a fresh
-session pointed at a mounted previous-session Output), a ckpt_latest.pt
-copy exists for convenience, and writes are atomic so a checkpoint file is
-never left truncated if the session is killed mid-save.
+"""Shared training infrastructure, used by both Stage 1 and Stage 3's
+training scripts and every evaluation/inference script that needs to
+load one of their checkpoints. See PROJECT_NOTES.md's "Resumability
+strategy" section for the reasoning behind the design: checkpoints are
+named by step number so "which one is newest" can always be figured out
+just by listing a directory (this matters both within one Kaggle session
+and when a fresh session mounts a previous session's Output as input), a
+ckpt_latest.pt copy exists purely for convenience, and writes go through
+a temp file + atomic rename so a checkpoint is never left half-written if
+the session gets killed mid-save.
 """
 from __future__ import annotations
 
@@ -23,10 +25,12 @@ _CKPT_RE = re.compile(r"ckpt_step(\d+)\.pt$")
 
 
 def checkpoint_path(directory: str, step: int) -> str:
+    """The filename a checkpoint at this step would have -- zero-padded so plain alphabetical sort already puts them in step order."""
     return os.path.join(directory, f"ckpt_step{step:08d}.pt")
 
 
 def find_all_checkpoints(directory: str) -> list[tuple[int, str]]:
+    """Every checkpoint file in a directory as (step, path) pairs, sorted oldest to newest. Returns an empty list for a directory that doesn't exist yet, rather than raising."""
     if not os.path.isdir(directory):
         return []
     found = []
@@ -60,6 +64,7 @@ def save_checkpoint(
     keep_last_n: int = 3,
     extra: dict | None = None,
 ) -> str:
+    """Writes model/EMA/optimizer/scheduler state to disk, updates the ckpt_latest.pt convenience copy, and prunes anything older than the keep_last_n most recent checkpoints."""
     os.makedirs(directory, exist_ok=True)
     payload = {
         "step": step,
@@ -82,6 +87,7 @@ def save_checkpoint(
 
 
 def _prune_old_checkpoints(directory: str, keep_last_n: int) -> None:
+    """Deletes every checkpoint file except the keep_last_n most recent ones -- ignores errors deleting an individual file rather than letting a locked/already-gone file stop training."""
     ckpts = find_all_checkpoints(directory)
     if len(ckpts) <= keep_last_n:
         return
@@ -100,6 +106,7 @@ def load_checkpoint(
     scheduler=None,
     map_location: str = "cpu",
 ) -> tuple[int, dict]:
+    """Loads a checkpoint file into whichever of model/ema/optimizer/scheduler are actually passed in -- pass None for anything you don't want touched (e.g. --warm_start_checkpoint loads only the model, leaving a fresh optimizer/scheduler in place). Returns the step it was saved at plus whatever else was stashed in "extra"."""
     payload = torch.load(path, map_location=map_location, weights_only=False)
     model.load_state_dict(payload["model_state"])
     if ema is not None and payload.get("ema_state") is not None:

@@ -1,5 +1,11 @@
-# Stage 1 (MRI -> CT), simple regression U-Net alternative to the wavelet
-# diffusion model (configs/stage1_synthrad.yaml). Added 2026-07-16 after a
+# STAGE 1 (MRI-to-CT translation) -- config.
+#
+# Input: SynthRAD2023 paired MRI/CT volumes (data/loaders_synthrad.py).
+# Output: settings for training/train_stage1_regression.py, consumed by
+# every Stage 1/2 script that needs the same model shape or preprocessing.
+#
+# Simple regression U-Net alternative to the wavelet diffusion model
+# (configs/stage1_synthrad.yaml). Added 2026-07-16 after a
 # user-trained prototype of this same simple architecture (L1 loss, skip
 # connections, 96x96x64 patches) got train PSNR 32-34 dB / SSIM 0.96-0.98
 # on real Kaggle data -- vastly ahead of the diffusion model's ~9 dB at

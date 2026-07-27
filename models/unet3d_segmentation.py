@@ -1,15 +1,18 @@
-"""Pipeline role: Stage 3's model -- binary tumor segmentation from a CT
-volume. Architecturally the same plain 3D encoder-decoder U-Net as
-models/unet3d_regression.py (Stage 1), adapted for a different task: input
-is a CT volume (not MRI), output is a per-voxel tumor probability map via
-sigmoid (not a predicted CT via tanh). Loss (Dice+BCE) is computed by the
-caller (training/train_stage3_segmentation.py), same convention as Stage 1.
+"""STAGE 3 (CT tumor segmentation) -- the model.
 
-Deliberately its own file with no shared code with unet3d_regression.py --
-same pipeline-isolation reasoning used throughout this project: identical
+Input: a single-channel CT volume (real Jordan hospital scans at
+inference/validation, synthetic Stage 2 output at training time),
+normalized to [-1, 1]. Output: a single-channel per-voxel tumor
+probability map. Architecturally this is the exact same plain 3D
+encoder-decoder U-Net as models/unet3d_regression.py (Stage 1) -- same
+building blocks, just pointed at a different task. The loss (see
+training/train_stage3_segmentation.py) is computed by the caller, not
+here.
+
+This file shares no code with unet3d_regression.py on purpose. The
 building blocks (ConvBlock3D, Down3D, Up3D, _safe_num_groups) are
-duplicated rather than imported, so a change to one stage's model can
-never silently affect another's.
+duplicated rather than imported so that a change made for one stage's
+model can never accidentally leak into the other's.
 """
 from __future__ import annotations
 

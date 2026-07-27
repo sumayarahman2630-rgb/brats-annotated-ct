@@ -1,9 +1,14 @@
-"""Quantitative, full-volume Dice/IoU evaluation of a Stage 3 checkpoint on
-the SYNTHETIC validation split (the patient-level held-out split
+"""STAGE 3 (CT tumor segmentation) -- internal validation metrics.
+
+Input: a trained Stage 3 checkpoint and the synthetic CT validation split.
+Output: per-patient Dice/IoU (CSV) plus the mean/std across the split --
+this is the "official" internal segmentation quality number for this
+project (see inference/generate_full_report.py for internal + external
+side by side). Quantitative, full-volume Dice/IoU evaluation on the
+SYNTHETIC validation split (the patient-level held-out split
 build_synthetic_ct_dataloaders produces, e.g. 37 patients out of 368 under
-data.train_val_split=0.9) -- the "official" segmentation quality number
-for this dataset, as distinct from two other, DIFFERENT numbers this
-project produces that must not be reported interchangeably with it:
+data.train_val_split=0.9) -- as distinct from two other, DIFFERENT numbers
+this project produces that must not be reported interchangeably with it:
 
 1. training/train_stage3_segmentation.py's periodic quick_validation
    check, computed on a center-cropped (not tumor-centered) PATCH of each
@@ -138,6 +143,9 @@ def write_csv(rows: list[dict], output_csv: str) -> None:
 
 
 def main():
+    """Load the checkpoint (raw weights), run full-volume inference on
+    every synthetic val patient, optionally search a threshold and/or apply
+    largest-component filtering, then write per-patient Dice/IoU to CSV."""
     args = parse_args()
     with open(args.config) as f:
         config = yaml.safe_load(f)

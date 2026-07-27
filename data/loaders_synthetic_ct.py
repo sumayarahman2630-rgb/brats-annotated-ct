@@ -1,9 +1,11 @@
-"""Pipeline role: Stage 3 training data source -- discovers the synthetic
-CT + tumor mask pairs Stage 2 (inference/run_stage2_brats_regression.py)
-generated, and builds the train/val DataLoaders Stage 3's segmentation
-model trains on. This is the ONLY data source Stage 3 training uses; the
-Jordan hospital dataset (data/loaders_jordan_ct.py) is external validation
-only and is never touched by this module.
+"""STAGE 3 (CT tumor segmentation) -- the training data source.
+
+Input: the synthetic CT + tumor mask pairs Stage 2
+(inference/run_stage2_brats_regression.py) generated. Output: train/val
+DataLoaders Stage 3's segmentation model trains on. This is the ONLY data
+source Stage 3 training uses; the Jordan hospital dataset
+(data/loaders_jordan_ct.py) is external validation only and is never
+touched by this module.
 
 Per-patient folder layout (matches Stage 2's output convention exactly):
     <root>/<patient_id>/synthetic_ct.nii(.gz)
@@ -132,6 +134,7 @@ class SyntheticCTSegDataset(Dataset):
         rot90_prob: float = 0.5,
         intensity_jitter_std: float = 0.05,
     ):
+        """Stores preprocessing/augmentation settings for this split (train or val -- the caller decides via patch_size/foreground_prob/augment)."""
         self.patients = patients
         self.ct_clip_range = ct_clip_range
         self.crop_margin = crop_margin
@@ -147,6 +150,7 @@ class SyntheticCTSegDataset(Dataset):
         self._rng = np.random.default_rng(seed)
 
     def __len__(self) -> int:
+        """Number of patients in this split."""
         return len(self.patients)
 
     def _load_and_preprocess(self, patient: SyntheticCTPatient) -> dict[str, np.ndarray]:

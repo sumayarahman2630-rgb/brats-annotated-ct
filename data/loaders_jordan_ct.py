@@ -1,11 +1,12 @@
-"""Pipeline role: loads the Jordan University Hospital external validation
-data (inference/validate_jordan_segmentation.py's only consumer) -- real CT
-and real tumor mask, as individual 2D DICOM slices, matched by patient ID
-and slice number extracted from filenames. NEVER used for training (see
-PROJECT_NOTES.md's Stage 3 section for why: this dataset is small, 2D-only,
-and a different acquisition/format from the synthetic training data --
-exactly the kind of held-out set that should only ever measure
-generalization, never influence it).
+"""STAGE 3 (CT tumor segmentation) -- external validation data source.
+
+Input: the Jordan University Hospital CT scans and their real tumor masks,
+as individual 2D DICOM slices. Output: matched (CT, mask) slice pairs for
+inference/validate_jordan_segmentation.py, the only consumer of this
+module. NEVER used for training (see PROJECT_NOTES.md's Stage 3 section for
+why: this dataset is small, 2D-only, and a different acquisition/format from
+the synthetic training data -- exactly the kind of held-out set that should
+only ever measure generalization, never influence it).
 
 Known, load-bearing limitations of this dataset (see PROJECT_NOTES.md for
 the full discussion -- summarized here since they directly shape this
@@ -149,9 +150,11 @@ class JordanCTSegDataset(Dataset):
     this dataset exists only for external validation."""
 
     def __init__(self, slices: list[JordanSlice]):
+        """Stores the matched slice list -- no I/O happens until __getitem__ is called."""
         self.slices = slices
 
     def __len__(self) -> int:
+        """Number of matched CT/mask slices (not patients -- a patient can contribute several)."""
         return len(self.slices)
 
     def __getitem__(self, idx: int) -> dict:

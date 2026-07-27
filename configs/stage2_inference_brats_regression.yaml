@@ -1,7 +1,12 @@
-# Stage 2 (synthetic CT generation from BraTS T1 volumes), regression-model
-# variant of configs/stage2_inference_brats.yaml. Same BraTS path/layout
-# assumptions -- see that file's header comment and PROJECT_NOTES.md's "Kaggle
-# dataset paths" section, unchanged here.
+# STAGE 2 (synthetic CT dataset generation) -- config.
+#
+# Input: BraTS T1 MRI + tumor masks, plus the trained Stage 1 checkpoint.
+# Output: settings for inference/run_stage2_brats_regression.py, which
+# writes the synthetic CT + tumor mask dataset used to train Stage 3.
+#
+# Regression-model variant of configs/stage2_inference_brats.yaml. Same
+# BraTS path/layout assumptions -- see that file's header comment and
+# PROJECT_NOTES.md's "Kaggle dataset paths" section, unchanged here.
 
 stage1_config: "configs/stage1_regression.yaml"   # regression checkpoint + architecture + preprocessing params
 

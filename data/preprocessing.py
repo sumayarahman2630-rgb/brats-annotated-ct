@@ -1,12 +1,16 @@
-"""Pipeline role: the single shared preprocessing module every data loader
-(SynthRAD, BraTS) and both Stage 1/Stage 2 scripts import from -- resample,
-HU clip/normalize, MRI percentile-normalize, brain-mask apply/crop/pad.
-Having exactly one implementation of each of these is what guarantees
-Stage 2's BraTS input is normalized identically to what Stage 1 trained on
-(see PROJECT_NOTES.md's "domain gap" note for why that match matters here more
-than in a typical pipeline). Everything here follows SynthRAD2023's
-official preprocessing conventions (resample, clip, mask-based background
-fill, bbox crop).
+"""SHARED across Stage 1, 2, and 3 -- not specific to any one of them.
+
+Input: raw MRI/CT volumes (as SimpleITK images or numpy arrays) and their
+brain/tumor masks. Output: resampled, normalized, cropped, and padded
+arrays ready to feed a model, plus a couple of training-time patch
+sampling and augmentation helpers. Every data loader in this project
+(SynthRAD, BraTS, the synthetic CT Stage 2 produces, Jordan) goes through
+this one module for resample/clip/normalize/crop/pad, which is exactly
+what guarantees Stage 2's BraTS input ends up normalized the same way
+Stage 1 was trained on -- see PROJECT_NOTES.md's "domain gap" note for why
+that match matters more here than it would in a typical pipeline. The
+conventions themselves (resample, clip, mask-based background fill, bbox
+crop) follow SynthRAD2023's own official preprocessing.
 """
 from __future__ import annotations
 

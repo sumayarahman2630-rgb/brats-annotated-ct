@@ -1,9 +1,12 @@
-"""Pipeline role: reusable, per-patient qualitative visualization of a Stage
-3 segmentation checkpoint's predictions, on BOTH available data sources --
-synthetic CT validation patients (real 3D volumes with a real tumor mask,
-in-distribution, unseen during training) and Jordan external CT slices (real
-hospital data, out-of-distribution -- see data/loaders_jordan_ct.py's module
-docstring for its known format/dimensionality limitations).
+"""STAGE 3 (CT tumor segmentation) -- qualitative prediction visualization.
+
+Input: a trained Stage 3 checkpoint, run against BOTH available data
+sources -- synthetic CT validation patients (real 3D volumes with a real
+tumor mask, in-distribution, unseen during training) and Jordan external CT
+slices (real hospital data, out-of-distribution -- see
+data/loaders_jordan_ct.py's module docstring for its known
+format/dimensionality limitations). Output: one 3-panel PNG per patient/slice
+(CT, real mask overlay, predicted mask overlay).
 
 Both sources funnel through the SAME sliding-window inference
 (models/unet3d_segmentation.py's predict_full_volume) and the SAME 3-panel
@@ -182,6 +185,8 @@ def visualize_jordan(model, device, jordan_ct_root: str, jordan_mask_root: str, 
 
 
 def main():
+    """Load the checkpoint (raw weights) and generate comparison panels for
+    whichever source(s) --source selects, synthetic and/or Jordan."""
     args = parse_args()
     with open(args.config) as f:
         config = yaml.safe_load(f)
