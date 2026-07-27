@@ -1,24 +1,4 @@
-"""STAGE 1 (MRI-to-CT translation) -- the training data source.
-
-Input: raw SynthRAD2023 brain patient folders (paired MRI/CT/brain-mask
-NIfTI files). Output: train/val PyTorch DataLoaders yielding preprocessed
-(mri, ct, mask) tensor triples. Both the active regression training
-script and the archived diffusion one consume this identically. This is
-also the one place patient-level train/val splitting happens for Stage
-1 -- worth reading build_synthrad_dataloaders's docstring before
-touching it, since getting that split wrong silently invalidates every
-validation number downstream.
-
-Confirmed exact layout (2026-07-15): every immediate subfolder of
-data.synthrad_root (.../synthrad-2023/Task1/brain) is either a patient
-folder containing ct.nii, mask.nii, mr.nii, or a non-patient folder like
-"overview" that Kaggle copies alongside the patient data.
-discover_synthrad_patients decides a folder is a patient by checking it
-actually has all three files, rather than keeping a list of known
-non-patient names to exclude -- that way, any other stray folder that
-shows up in a future dataset version gets skipped the same way
-"overview" is, without anyone having to remember to update a denylist.
-"""
+"""Stage 1 -- loads SynthRAD2023 MRI/CT/mask patients; output: train/val DataLoaders of preprocessed (mri, ct, mask) tensors."""
 from __future__ import annotations
 
 import logging

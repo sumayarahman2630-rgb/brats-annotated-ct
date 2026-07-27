@@ -1,14 +1,4 @@
-"""Shared training infrastructure, used by both Stage 1 and Stage 3's
-training scripts and every evaluation/inference script that needs to
-load one of their checkpoints. See PROJECT_NOTES.md's "Resumability
-strategy" section for the reasoning behind the design: checkpoints are
-named by step number so "which one is newest" can always be figured out
-just by listing a directory (this matters both within one Kaggle session
-and when a fresh session mounts a previous session's Output as input), a
-ckpt_latest.pt copy exists purely for convenience, and writes go through
-a temp file + atomic rename so a checkpoint is never left half-written if
-the session gets killed mid-save.
-"""
+"""Shared (Stage 1 + Stage 3) -- checkpoint save/find/load; output: resumable, step-numbered .pt files on disk."""
 from __future__ import annotations
 
 import os

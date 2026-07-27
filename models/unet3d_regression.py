@@ -1,18 +1,4 @@
-"""STAGE 1 (MRI-to-CT translation) -- the model.
-
-Input: a single-channel MRI volume, normalized to [-1, 1]. Output: a
-single-channel synthetic CT volume in the same scale. This is a plain 3D
-regression U-Net (encoder-decoder with skip connections, L1 loss computed
-by the caller) -- no diffusion, no timestep conditioning, nothing fancy.
-It's deliberately simpler than the archived wavelet diffusion model (no
-attention, no FiLM timestep embedding, no wavelet transform) and it beat
-it by a wide margin anyway: 28.21 dB foreground PSNR on held-out
-validation patients at step 20000, versus the diffusion checkpoint's
-~9 dB (see PROJECT_NOTES.md and the main README for the full comparison).
-No code is shared with the archived models on purpose -- if something
-breaks here, it can't take the archived version down with it, and vice
-versa.
-"""
+"""Stage 1 -- 3D regression U-Net; output: a synthetic CT volume predicted from an input MRI volume."""
 from __future__ import annotations
 
 import torch

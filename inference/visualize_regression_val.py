@@ -1,28 +1,4 @@
-"""STAGE 1 (MRI-to-CT translation) -- validation report.
-
-Input: the trained Stage 1 checkpoint and its held-out validation split.
-Output: a PSNR/SSIM number for every val patient (whole-volume and
-foreground-only) plus a 4-panel comparison image (input MRI / real CT /
-synthetic CT / error map) per patient -- the qualitative and quantitative
-evidence for the regression model's result (28.21 dB foreground PSNR at
-step 20000). Reuses the exact same patient-level split algorithm as
-training/train_stage1_regression.py (same config, same seed) so this is
-guaranteed to score only patients the model never trained on.
-
-Deliberately uses RAW checkpoint weights only, same anti-EMA-contamination
-pattern as compare_synthrad_val.py (see PROJECT_NOTES.md round 6): no EMA object
-is constructed here at all.
-
-Inference runs on each val patient's FULL cropped volume via sliding-window
-prediction (models/unet3d_regression.py's predict_full_volume) -- a direct
-single-forward-pass full-volume call OOM'd on a real Kaggle T4 (2026-07-16,
-during training's own periodic validation), so this always tiles the volume
-into patch_size windows (data.patch_size) with 50% overlap and blends the
-result, same bounded memory footprint training already proved safe.
-
-Run as:
-    python -m inference.visualize_regression_val --config configs/stage1_regression.yaml --num_patients 5
-"""
+"""Stage 1 -- validates the trained checkpoint; output: per-patient PSNR/SSIM and a 4-panel MRI/real-CT/synthetic-CT/error-map comparison image."""
 from __future__ import annotations
 
 import argparse

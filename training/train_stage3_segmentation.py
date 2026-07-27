@@ -1,27 +1,4 @@
-"""STAGE 3 (CT tumor segmentation) -- the training script.
-
-Input: the synthetic CT + binarized tumor mask pairs Stage 2 generated
-(via data/loaders_synthetic_ct.py). Output: a resumable checkpoint plus a
-CSV training log, same as Stage 1. Run as:
-
-    python -m training.train_stage3_segmentation --config configs/stage3_ct_segmentation.yaml
-
-The Jordan hospital dataset is NEVER read here -- it exists purely for
-external validation (inference/validate_jordan_segmentation.py), and
-touching it during training would defeat the entire point of holding it
-out as an unseen test set. See PROJECT_NOTES.md's Stage 3 section for the
-full reasoning and the known limitations of that external comparison.
-
-Resumability follows the same design as
-training/train_stage1_regression.py (numbered checkpoints, highest-step-
-wins resume, checkpoint-saved-before-validation ordering so a validation
-OOM can only cost one skipped readout, never real training progress --
-that ordering was a real bug found and fixed in Stage 1, applied here
-from day one instead of waiting to hit it again). Reimplemented rather
-than imported from train_stage1_regression.py (its own CycleLoader, its
-own lr-lambda helper), for the same reason: one stage's training script
-should never be able to break another's.
-"""
+"""Stage 3 -- trains the CT segmentation model; output: a resumable checkpoint and CSV training log (Jordan data is never touched here)."""
 from __future__ import annotations
 
 import argparse

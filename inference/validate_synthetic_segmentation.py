@@ -1,48 +1,4 @@
-"""STAGE 3 (CT tumor segmentation) -- internal validation metrics.
-
-Input: a trained Stage 3 checkpoint and the synthetic CT validation split.
-Output: per-patient Dice/IoU (CSV) plus the mean/std across the split --
-this is the "official" internal segmentation quality number for this
-project (see inference/generate_full_report.py for internal + external
-side by side). Quantitative, full-volume Dice/IoU evaluation on the
-SYNTHETIC validation split (the patient-level held-out split
-build_synthetic_ct_dataloaders produces, e.g. 37 patients out of 368 under
-data.train_val_split=0.9) -- as distinct from two other, DIFFERENT numbers
-this project produces that must not be reported interchangeably with it:
-
-1. training/train_stage3_segmentation.py's periodic quick_validation
-   check, computed on a center-cropped (not tumor-centered) PATCH of each
-   val volume, for cheap in-training monitoring only.
-2. inference/validate_jordan_segmentation.py's Dice/IoU, computed on the
-   Jordan EXTERNAL dataset (real hospital CT, 8-bit windowed RGB, pseudo-3D
-   slice replication) -- a different, out-of-distribution population.
-
-This script runs the SAME full-volume sliding-window inference
-(models/unet3d_segmentation.py's predict_full_volume) that
-inference/visualize_predictions.py uses for its qualitative panels, but
-over every validation patient rather than a handful, and computes/logs the
-quantitative Dice and IoU each time rather than only rendering an image.
-See methodology_draft.md's Section 6.2 for how this number should be
-described.
-
-Optional post-processing (both OFF by default, matching the fixed-0.5,
-no-filtering behavior every prior version of this script had):
-- --auto_threshold: search for the single GLOBAL threshold (not a
-  per-patient one -- see inference/postprocessing.py's docstring for why
-  that distinction matters) that maximizes MEAN Dice on this validation
-  set, and use it instead of --threshold for the final reported metrics.
-  The chosen value is also written to <output_csv's directory>/
-  best_threshold.txt so it can be reused, fixed, as
-  validate_jordan_segmentation.py's --threshold -- Jordan itself must
-  never have a threshold searched on it directly.
-- --use_largest_component: keep only the largest connected component of
-  each thresholded prediction, discarding small spurious blobs elsewhere
-  in the volume.
-
-Run as:
-    python -m inference.validate_synthetic_segmentation --config configs/stage3_ct_segmentation.yaml
-    python -m inference.validate_synthetic_segmentation --config configs/stage3_ct_segmentation.yaml --auto_threshold --use_largest_component
-"""
+"""Stage 3 -- official internal validation; output: per-patient Dice/IoU (CSV) plus mean/std on the synthetic CT validation split."""
 from __future__ import annotations
 
 import argparse

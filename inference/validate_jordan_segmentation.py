@@ -1,43 +1,4 @@
-"""STAGE 3 (CT tumor segmentation) -- external validation metrics.
-
-Input: a trained Stage 3 checkpoint and the Jordan University Hospital
-dataset (real CT, real tumor annotations, never seen during training).
-Output: per-slice Dice/IoU (CSV), the mean/std across all matched slices,
-and a side-by-side visualization comparing one synthetic (training-
-distribution) example against one Jordan (external) example.
-
-Read PROJECT_NOTES.md's Stage 3 section before trusting these numbers as
-more than a rough signal -- three of this script's own design choices are
-direct, load-bearing workarounds for known dataset limitations, not
-incidental implementation details:
-
-1. **No real 3D context.** Jordan only has isolated tumor-containing
-   slices (1-6 per patient), not full volumes -- there is no real
-   neighboring-slice information for a 3D model to use. This script
-   fakes a thin 3D "slab" by replicating the single 2D slice
-   `--replication_depth` times along Z (see `_build_pseudo_volume`) and
-   reads back the CENTER slice of the model's output. This gives the
-   model *something* 3D-shaped to run on, but every neighboring slice it
-   sees is a copy of the same slice, not real anatomy -- treat this as
-   "can the model do something reasonable given a single real slice",
-   not "3D segmentation quality on Jordan data".
-2. **No shared intensity scale.** Jordan CT is an 8-bit windowed
-   secondary-capture image (0-255, RGB), not raw HU -- data/loaders_jordan_ct.py
-   can only min-max normalize each slice to itself. The model was trained
-   on real-HU-normalized synthetic CT. Any Dice/IoU number here reflects
-   whether the model's predicted SHAPE overlaps the real tumor outline,
-   not whether its HU-based reasoning transfers -- it structurally cannot
-   be asked to transfer that, given the input format.
-3. **Filename-based slice matching is unverified beyond the naming
-   convention.** See data/loaders_jordan_ct.py's discover_jordan_slices --
-   any CT/mask pair used here already passed that matching, but a
-   silently wrong pairing (if the naming convention itself has an
-   exception this script's regex didn't anticipate) would still look like
-   a valid pair and quietly corrupt the reported metrics.
-
-Run as:
-    python -m inference.validate_jordan_segmentation --config configs/stage3_ct_segmentation.yaml
-"""
+"""Stage 3 -- official external validation; output: per-slice Dice/IoU (CSV) against real Jordan Hospital CT, never used in training."""
 from __future__ import annotations
 
 import argparse

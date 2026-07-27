@@ -1,17 +1,4 @@
-"""Shared training infrastructure, used by both Stage 1
-(training/train_stage1_regression.py) and Stage 3
-(training/train_stage3_segmentation.py) -- not specific to either.
-
-Exponential moving average of model weights: a second, slowly-updating
-copy of the parameters that smooths out the step-to-step noise of raw
-SGD/Adam updates. Every checkpoint saves this alongside the real
-weights, but it is NOT what any evaluation script in this project
-actually uses for its reported numbers -- raw weights are, on purpose
-(see PROJECT_NOTES.md's anti-EMA-contamination notes). EMA is reported
-only as an extra, side-by-side comparison in
-inference/generate_full_report.py, in case it turns out to score
-noticeably better or worse than the raw weights.
-"""
+"""Shared (Stage 1 + Stage 3) -- exponential moving average of model weights; output: a smoothed shadow copy of the parameters, saved for reference only."""
 from __future__ import annotations
 
 import torch

@@ -1,30 +1,4 @@
-"""STAGE 3 (CT tumor segmentation) -- qualitative prediction visualization.
-
-Input: a trained Stage 3 checkpoint, run against BOTH available data
-sources -- synthetic CT validation patients (real 3D volumes with a real
-tumor mask, in-distribution, unseen during training) and Jordan external CT
-slices (real hospital data, out-of-distribution -- see
-data/loaders_jordan_ct.py's module docstring for its known
-format/dimensionality limitations). Output: one 3-panel PNG per patient/slice
-(CT, real mask overlay, predicted mask overlay).
-
-Both sources funnel through the SAME sliding-window inference
-(models/unet3d_segmentation.py's predict_full_volume) and the SAME 3-panel
-save_panel() renderer -- only the data-loading path differs per source, so
-a synthetic example and a Jordan example are visually comparable side by
-side despite coming from very different pipelines.
-
-Feeding a full volume directly to the model (rather than through
-predict_full_volume) crashes with a torch.cat skip-connection shape
-mismatch unless the volume's spatial dims happen to already be exact
-multiples of 2**(num_levels-1) -- predict_full_volume avoids this by
-padding every individual tile up to the exact trained patch_size (itself
-validated as divisible by that factor) before each forward() call, so this
-script never calls the model directly on an arbitrarily-shaped volume.
-
-Run as:
-    python -m inference.visualize_predictions --config configs/stage3_ct_segmentation.yaml --source both --num_patients 5
-"""
+"""Stage 3 -- visualizes checkpoint predictions on synthetic and/or Jordan CT; output: one 3-panel PNG per patient/slice."""
 from __future__ import annotations
 
 import argparse

@@ -1,44 +1,4 @@
-"""STAGE 3 (CT tumor segmentation) -- the full post-training report.
-
-Input: a trained Stage 3 checkpoint, its training log, the synthetic
-validation split, and the Jordan external dataset. Output: everything a
-supervisor would want to see about one checkpoint in a single folder --
-training curves, internal + external Dice/IoU (raw and, informationally,
-EMA), an optional literature comparison chart, and example prediction
-images -- so nothing needs to be requested/run individually after a
-training session finishes:
-
-1. Training loss/Dice curve (train + val, the whole run), read from
-   training.log_file.
-2. Internal (synthetic validation) full-volume Dice/IoU: mean/std,
-   per-patient CSV + summary log (same computation as
-   inference/validate_synthetic_segmentation.py).
-3. External (Jordan) full-volume Dice/IoU: mean/std, per-slice CSV +
-   summary log (same computation as
-   inference/validate_jordan_segmentation.py), using the SAME threshold as
-   the internal evaluation (never independently tuned on Jordan -- see
-   inference/postprocessing.py's docstring).
-4. A comparison bar chart against a literature baseline, ONLY if its
-   numbers are supplied explicitly via --comparison_label /
-   --comparison_internal_dice / --comparison_external_dice -- this script
-   never fabricates or guesses a literature comparison value; if none are
-   given, the chart is skipped with a clear log message explaining why.
-5. 3-5 example prediction visualizations per source (CT / real mask /
-   predicted mask, via inference/visualize_predictions.py's save_panel),
-   sampled evenly across the sorted best-to-worst Dice range so the
-   images show the actual spread of quality, not just the best cases.
-6. An additional, side-by-side EMA-weight evaluation (internal + external,
-   same threshold and post-processing as the raw-weight pass, separate
-   CSVs) -- purely informational. Raw weights remain what visualizations
-   and the comparison chart use, per this project's established
-   anti-EMA-contamination convention; pass --skip_ema_eval to omit it.
-
-Everything is saved to --output_dir; nothing is only printed to the console.
-
-Run as (after training finishes):
-    python -m inference.generate_full_report --config configs/stage3_ct_segmentation.yaml \\
-        --comparison_label "Wang et al. (2024)" --comparison_internal_dice 0.71 --comparison_external_dice 0.58
-"""
+"""Stage 3 -- runs the full post-training report; output: training curves, internal + external Dice/IoU, and example prediction images in one folder."""
 from __future__ import annotations
 
 import argparse

@@ -1,43 +1,4 @@
-"""STAGE 2 (synthetic CT dataset generation) -- the input side.
-
-Input: BraTS 2020 T1 MRI volumes and their expert tumor segmentation
-masks. Output: preprocessed T1 tensors ready to feed the Stage 1
-checkpoint, plus everything needed to place the resulting synthetic CT
-back into the original BraTS grid alongside its (unmodified) tumor mask.
-This is the T1-only half of Stage 2 -- see
-inference/run_stage2_brats_regression.py for where the Stage 1 model
-actually gets called and the synthetic CT/mask pair gets written out.
-
-Discovery groups files by patient ID *extracted from the filename itself*
-(e.g. "BraTS20_Training_001" from "BraTS20_Training_001_t1.nii.gz"), not by
-directory structure -- this works whether the Kaggle copy nests one folder
-per patient (the standard MICCAI_BraTS2020_TrainingData layout) or has
-everything in one flat folder, since BraTS filenames always embed the full
-patient ID regardless of layout. This is why the approach differs from
-loaders_synthrad.py's directory-based grouping: SynthRAD2023's official
-files are just named ct.nii.gz/mr.nii.gz with no patient ID in the
-filename, so directory grouping is the only option there.
-
-Preprocessing reuses the exact same normalize_mri / resample_to_spacing /
-pad_to_multiple functions Stage 1 training used on the MR channel, with the
-same target_spacing, spatial_multiple, and crop_margin values -- pass in the
-same values used for configs/stage1_synthrad.yaml's data section (see
-inference/run_stage2_brats.py, which does this automatically by loading
-the Stage 1 config).
-
-Critically, this also reuses Stage 1's bounding-box crop step (see
-SynthRADBrainDataset._load_and_preprocess in loaders_synthrad.py: mask ->
-crop-to-bbox+margin -> normalize -> pad). BraTS T1 is already skull-stripped
-so the masking step is implicit (background is already 0), but the CROP
-step still has to happen explicitly -- without it, the model would see the
-full ~240x240x155 BraTS grid (brain filling ~40-50% of the frame) instead of
-the tightly brain-cropped volumes (brain filling ~80-90% of the frame) it
-was actually trained on. That mismatch doesn't crash anything (the network
-is fully convolutional) but is exactly the kind of silent distribution
-shift that produces garbage output -- found and fixed 2026-07-15 while
-Stage 1 training was still running, specifically by re-reading both
-preprocessing paths side by side before Stage 2's first real run.
-"""
+"""Stage 2 -- loads BraTS T1 MRI + tumor masks; output: preprocessed T1 tensors ready for Stage 1 inference, paired with the original mask."""
 from __future__ import annotations
 
 import logging

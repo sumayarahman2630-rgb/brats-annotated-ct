@@ -1,31 +1,4 @@
-"""STAGE 1 (MRI-to-CT translation) -- the training script.
-
-Input: SynthRAD2023 paired MRI/CT/brain-mask patients (via
-data/loaders_synthrad.py). Output: a resumable checkpoint (see
-training/checkpoint.py) plus a CSV training log. Run as:
-
-    python -m training.train_stage1_regression --config configs/stage1_regression.yaml
-
-Added 2026-07-16 after a hand-run prototype of this same simple
-architecture (L1 loss, skip connections, 96x96x64 patches) got train PSNR
-32-34 dB on real Kaggle data, vastly ahead of the diffusion model -- but
-the prototype had no patient-level train/val split and no brain-masking,
-so its numbers weren't trustworthy. This script fixes both by reusing
-data/loaders_synthrad.py's SynthRADBrainDataset directly (the same class
-the archived diffusion pipeline used, so preprocessing behaves
-identically) rather than writing new loading logic from scratch. Train
-patients get cropped to data.patch_size; val patients are kept at full
-volume (patch_size=None), so the reported validation PSNR/SSIM reflects
-the whole brain rather than one random patch that would vary between
-checks.
-
-Resumability follows the same design as the archived diffusion training
-scripts (numbered checkpoints, highest-step-wins resume across
-checkpoint.working_dir + checkpoint.extra_resume_dirs) -- deliberately
-reimplemented here (its own CycleLoader, its own lr-lambda helper) rather
-than importing from those scripts, so a bug in one training script can
-never quietly break another.
-"""
+"""Stage 1 -- trains the MRI-to-CT regression model; output: a resumable checkpoint and CSV training log."""
 from __future__ import annotations
 
 import argparse

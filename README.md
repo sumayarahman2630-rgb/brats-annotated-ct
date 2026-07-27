@@ -2,15 +2,151 @@
 
 Real annotated CT of brain tumors is hard to get in bulk -- hospitals hold
 it under strict access controls, and public datasets with both a CT volume
-and a matching tumor mask are rare. This project builds one anyway, by
-learning to translate MRI into CT and then running that translation over
-a large public MRI-plus-tumor-mask dataset (BraTS) that would otherwise be
-unusable for CT-based work. The result is a three-stage pipeline: Stage 1
-trains an MRI-to-CT model on real paired scans, Stage 2 uses that model to
-generate a synthetic, tumor-annotated CT dataset from BraTS, and Stage 3
-trains a CT tumor segmentation model on that synthetic dataset and checks
-how well it holds up against a small set of real hospital CT scans it
-never saw during training.
+and a matching tumor mask are rare. I built this project to get around
+that: train a model to translate MRI into CT, then run that translation
+over a large public MRI-plus-tumor-mask dataset (BraTS) that would
+otherwise be unusable for CT-based work. That gives me a synthetic,
+tumor-annotated CT dataset I can then train a CT segmentation model on,
+and check against a small set of real hospital CT scans it never saw
+during training. Below is the walkthrough of how I actually ran this, in
+the order I ran it, on Kaggle.
+
+## What I did, step by step
+
+**Stage 1 -- getting MRI-to-CT translation working.** I uploaded the
+SynthRAD2023 brain cohort (180 patients, paired real MRI/CT/brain-mask
+volumes) as a Kaggle input and trained the regression U-Net in
+[`models/unet3d_regression.py`](models/unet3d_regression.py):
+
+```bash
+python -m training.train_stage1_regression --config configs/stage1_regression.yaml --max_steps 100 --max_patients 3
+python -m training.train_stage1_regression --config configs/stage1_regression.yaml
+```
+
+I smoke-tested with `--max_steps`/`--max_patients` first to catch config or
+path errors before burning a real GPU session, then ran the full
+20,000-step training job from [`configs/stage1_regression.yaml`](configs/stage1_regression.yaml).
+The 180 patients get split 90/10 by patient (never by slice or volume, to
+avoid leakage) -- 162 for training, 18 held out for validation. After
+training finished, I checked how well it actually generalized to those 18
+unseen patients:
+
+```bash
+python -m inference.visualize_regression_val --config configs/stage1_regression.yaml
+```
+
+That produced a PSNR/SSIM number per validation patient plus a 4-panel
+comparison image (input MRI / real CT / synthetic CT / error map) for each
+one. **The mean foreground PSNR across all 18 held-out patients came out
+to 28.92 dB** -- this is the number I use everywhere else in this repo and
+in the thesis; it's an average over the full held-out set, not one
+patient's best result or a single checkpoint's last logged value.
+
+**Stage 2 -- generating the annotated synthetic CT dataset.** With a
+working Stage 1 checkpoint, I uploaded BraTS2020 (369 T1 MRI + tumor mask
+patients, one of which was missing its mask) and ran the Stage 1 model
+over the whole cohort:
+
+```bash
+python -m inference.run_stage2_brats_regression --config configs/stage2_inference_brats_regression.yaml --limit 3
+python -m inference.run_stage2_brats_regression --config configs/stage2_inference_brats_regression.yaml
+```
+
+Again, I smoke-tested with `--limit 3` first. The full run generated a
+synthetic CT volume for every BraTS patient it could pair with a tumor
+mask, wrote each one alongside its mask under
+`synthetic_ct_dataset_regression/<patient_id>/`, and logged every
+outcome (success, skipped, failed) to `manifest.csv`. This produced
+**365 synthetic CT + tumor mask pairs** -- this is the dataset I re-uploaded
+as its own Kaggle input for Stage 3.
+
+**Stage 3 -- training and validating the segmentation model.** I trained
+a binary tumor segmentation U-Net on the Stage 2 output:
+
+```bash
+python -m training.train_stage3_segmentation --config configs/stage3_ct_segmentation.yaml --max_steps 100 --max_patients 3
+python -m training.train_stage3_segmentation --config configs/stage3_ct_segmentation.yaml
+```
+
+This part took several retraining passes to get right -- the full
+evolution (loss function changes, a couple of lost checkpoints from
+Kaggle session resets, augmentation added partway through) is documented
+in [`PROJECT_NOTES.md`](PROJECT_NOTES.md). Once I had a checkpoint I
+trusted, I got the official internal number (full-volume Dice/IoU across
+the entire synthetic validation split, not the cheap patch-level number
+training logs periodically during the run):
+
+```bash
+python -m inference.validate_synthetic_segmentation --config configs/stage3_ct_segmentation.yaml
+```
+
+Then I checked how that same checkpoint held up against real hospital
+data it had never seen -- 20 CT patients from Jordan University Hospital,
+attached as a separate Kaggle input, held out purely for this step:
+
+```bash
+python -m inference.validate_jordan_segmentation --config configs/stage3_ct_segmentation.yaml
+```
+
+The most recent checkpoint I measured this way (focal loss, alpha=0.75)
+came back at **0.1987 Dice on the Jordan external set**. Finally, to get
+everything -- training curves, internal + external Dice/IoU, and example
+prediction images -- in one place after a training run finishes, I ran:
+
+```bash
+python -m inference.generate_full_report --config configs/stage3_ct_segmentation.yaml
+```
+
+**Last, I ran the test suite** to make sure nothing in the active pipeline
+was broken before calling any of this done:
+
+```bash
+pip install -r requirements.txt
+python -m pytest tests/
+```
+
+Figures for the writeup (PSNR curves, distributions, scatter plots) come
+from `analysis/`, run after Stage 1 validation has produced real data:
+```bash
+python -m analysis.plot_validation_psnr_curve --config configs/stage1_regression.yaml
+python -m analysis.generate_val_metrics_table --config configs/stage1_regression.yaml
+python -m analysis.plot_psnr_ssim_distribution --metrics_csv /kaggle/working/analysis_plots/val_metrics.csv
+python -m analysis.plot_psnr_vs_ssim_scatter --metrics_csv /kaggle/working/analysis_plots/val_metrics.csv
+```
+
+## Results Summary
+
+| Stage | Metric | Value |
+|---|---|---|
+| Stage 1 (MRI-to-CT) | Foreground PSNR, mean across 18 held-out validation patients | **28.92 dB** |
+| Stage 2 (dataset generation) | Synthetic CT + tumor mask pairs generated | **365 patients** (from BraTS2020) |
+| Stage 3 (segmentation), external | Dice, Jordan Hospital CT (real, never trained on) | **0.1987** (most recently measured checkpoint, focal loss, alpha=0.75) |
+
+A couple of notes on reading that Stage 3 row: the internal metric
+(full-volume Dice on the synthetic validation split, produced by
+`validate_synthetic_segmentation.py`) went through several loss-function
+and checkpoint iterations documented in
+[`PROJECT_NOTES.md`](PROJECT_NOTES.md), and the current run's number
+should be regenerated with the command above rather than assumed stable
+across retrains. And the Jordan number reflects a genuinely different,
+harder comparison than the internal one -- see
+[`data/loaders_jordan_ct.py`](data/loaders_jordan_ct.py)'s module
+docstring for why (8-bit windowed RGB DICOM with no real HU values, only
+1-6 slices per patient instead of a full volume) before treating it as
+directly comparable to the internal number.
+
+I also tried a wavelet-diffusion model for Stage 1 before settling on the
+regression U-Net above:
+
+| Model | Foreground PSNR (mean, 18 held-out val patients) |
+|---|---:|
+| **Regression U-Net (active)** | **28.92 dB** |
+| Wavelet diffusion (archived) | ~9 dB, undertrained given the available compute budget |
+
+See [`PROJECT_NOTES.md`](PROJECT_NOTES.md) for the full development
+narrative -- what was tried, what broke, and why -- and
+[`archive/README.md`](archive/README.md) for why the diffusion approach
+was kept, not deleted.
 
 ## Project Structure
 
@@ -68,109 +204,13 @@ Hospital that was never used in training.
 - [`analysis/`](analysis) -- figure/table generation from real training logs and checkpoints (see below)
 - [`archive/`](archive) -- the original wavelet-diffusion approach for Stage 1, kept for the record (see [archive/README.md](archive/README.md) for why it was replaced)
 
-## How to Run
-
-Everything below assumes a Kaggle GPU session with the SynthRAD2023 and
-BraTS2020 datasets mounted (see [`PROJECT_NOTES.md`](PROJECT_NOTES.md)'s
-"Kaggle dataset paths" for the exact confirmed input paths).
-
-**Stage 1 -- train the MRI-to-CT model** (smoke-test first):
-```bash
-python -m training.train_stage1_regression --config configs/stage1_regression.yaml --max_steps 100 --max_patients 3
-python -m training.train_stage1_regression --config configs/stage1_regression.yaml
-```
-
-Check validation quality (PSNR/SSIM + comparison images on held-out patients):
-```bash
-python -m inference.visualize_regression_val --config configs/stage1_regression.yaml
-```
-
-**Stage 2 -- generate the annotated synthetic CT dataset** (smoke-test with `--limit` first):
-```bash
-python -m inference.run_stage2_brats_regression --config configs/stage2_inference_brats_regression.yaml --limit 3
-python -m inference.run_stage2_brats_regression --config configs/stage2_inference_brats_regression.yaml
-```
-
-**Stage 3 -- train the segmentation model on the Stage 2 output** (smoke-test first):
-```bash
-python -m training.train_stage3_segmentation --config configs/stage3_ct_segmentation.yaml --max_steps 100 --max_patients 3
-python -m training.train_stage3_segmentation --config configs/stage3_ct_segmentation.yaml
-```
-
-Get the official internal Dice/IoU (full-volume, entire synthetic
-validation split -- not the cheap patch-level number training logs
-periodically):
-```bash
-python -m inference.validate_synthetic_segmentation --config configs/stage3_ct_segmentation.yaml
-```
-
-Validate against the Jordan external dataset (never used in training):
-```bash
-python -m inference.validate_jordan_segmentation --config configs/stage3_ct_segmentation.yaml
-```
-
-Or generate everything above in one run once training finishes (training
-curves, internal + external Dice/IoU, an EMA side-by-side comparison, and
-example prediction images):
-```bash
-python -m inference.generate_full_report --config configs/stage3_ct_segmentation.yaml
-```
-
-**Figures** (once training/validation has produced real data):
-```bash
-python -m analysis.plot_validation_psnr_curve --config configs/stage1_regression.yaml
-python -m analysis.generate_val_metrics_table --config configs/stage1_regression.yaml
-python -m analysis.plot_psnr_ssim_distribution --metrics_csv /kaggle/working/analysis_plots/val_metrics.csv
-python -m analysis.plot_psnr_vs_ssim_scatter --metrics_csv /kaggle/working/analysis_plots/val_metrics.csv
-```
-
-**Test suite** (CPU-only, no GPU or real data needed):
-```bash
-pip install -r requirements.txt
-python -m pytest tests/
-```
-
-## Results Summary
-
-| Stage | Metric | Value |
-|---|---|---|
-| Stage 1 (MRI-to-CT) | Foreground PSNR, held-out validation patients | **28.21 dB** (step 20000, raw weights) |
-| Stage 2 (dataset generation) | Synthetic CT + tumor mask pairs generated | **365 patients** (from BraTS2020) |
-| Stage 3 (segmentation), external | Dice, Jordan Hospital CT (real, never trained on) | **0.1987** (most recently measured checkpoint, focal loss, alpha=0.75) |
-
-Two notes on how to read the Stage 3 row: the internal metric (full-volume
-Dice on the synthetic validation split, produced by
-`validate_synthetic_segmentation.py`) has gone through several
-loss-function and checkpoint iterations documented in
-[`PROJECT_NOTES.md`](PROJECT_NOTES.md), and the current run's number
-should be regenerated with the command above rather than assumed stable
-across retrains. And the Jordan number reflects a genuinely different,
-harder comparison than the internal one -- see
-[`data/loaders_jordan_ct.py`](data/loaders_jordan_ct.py)'s module
-docstring for why (8-bit windowed RGB DICOM with no real HU values, only
-1-6 slices per patient instead of a full volume) before treating it as
-directly comparable to the internal number.
-
-Two Stage 1 architectures were tried; the regression U-Net above is the
-one that reached a usable result:
-
-| Model | Foreground PSNR (val, unseen patients) |
-|---|---:|
-| **Regression U-Net (active)** | **28.21 dB** |
-| Wavelet diffusion (archived) | ~9 dB, undertrained given the available compute budget |
-
-See [`PROJECT_NOTES.md`](PROJECT_NOTES.md) for the full development
-narrative -- what was tried, what broke, and why -- and
-[`archive/README.md`](archive/README.md) for why the diffusion approach
-was kept, not deleted.
-
 ## Pipeline
 
 ```
 SynthRAD2023 MRI + CT (paired, real)
         │
         ▼
-  train Stage 1 regression U-Net  ──►  checkpoint (28.21 dB val PSNR)
+  train Stage 1 regression U-Net  ──►  checkpoint (28.92 dB mean val PSNR)
         │
         ▼
   BraTS2020 T1 MRI (no real CT)

@@ -1,17 +1,4 @@
-"""SHARED across Stage 1, 2, and 3 -- not specific to any one of them.
-
-Input: raw MRI/CT volumes (as SimpleITK images or numpy arrays) and their
-brain/tumor masks. Output: resampled, normalized, cropped, and padded
-arrays ready to feed a model, plus a couple of training-time patch
-sampling and augmentation helpers. Every data loader in this project
-(SynthRAD, BraTS, the synthetic CT Stage 2 produces, Jordan) goes through
-this one module for resample/clip/normalize/crop/pad, which is exactly
-what guarantees Stage 2's BraTS input ends up normalized the same way
-Stage 1 was trained on -- see PROJECT_NOTES.md's "domain gap" note for why
-that match matters more here than it would in a typical pipeline. The
-conventions themselves (resample, clip, mask-based background fill, bbox
-crop) follow SynthRAD2023's own official preprocessing.
-"""
+"""Shared (Stage 1 + 2 + 3) -- volume preprocessing; output: resampled, normalized, cropped/padded arrays ready to feed a model."""
 from __future__ import annotations
 
 import numpy as np

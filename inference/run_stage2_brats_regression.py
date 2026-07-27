@@ -1,29 +1,4 @@
-"""STAGE 2 (synthetic CT dataset generation) -- where it actually happens.
-
-Input: every BraTS T1 MRI + tumor mask pair (via data/loaders_brats.py) and
-the trained Stage 1 checkpoint (configs/stage1_regression.yaml). Output: a
-full synthetic-CT-plus-tumor-mask dataset on disk, one folder per patient,
-with a manifest.csv, metadata.json, and generated README.md dataset card.
-
-Regression-model counterpart to inference/run_stage2_brats.py (which is
-diffusion-specific: DDIM sampling via model.sample(), a completely
-different model class) -- the two scripts share no code, same pipeline-
-isolation reasoning as everywhere else in this project, but the BraTS
-loading / crop / place-in-canvas / manifest / metadata / README logic below
-is deliberately identical since none of that is model-specific.
-
-Run as:
-    python -m inference.run_stage2_brats_regression --config configs/stage2_inference_brats_regression.yaml
-
-Single deterministic forward pass per patient (sliding-window, see
-models/unet3d_regression.py's predict_full_volume) instead of diffusion's
-iterative DDIM sampling -- no num_steps/ddim concept here at all, which is
-also why this is dramatically faster per patient than the diffusion script.
-
-Resumable by design, same as run_stage2_brats.py: skips already-generated
-patients unless --overwrite, one bad patient never stops the cohort, full
-per-patient record in manifest.csv.
-"""
+"""Stage 2 -- runs the Stage 1 checkpoint over BraTS; output: a synthetic CT + tumor mask dataset on disk, one folder per patient."""
 from __future__ import annotations
 
 import argparse

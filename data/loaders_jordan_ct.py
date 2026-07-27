@@ -1,40 +1,4 @@
-"""STAGE 3 (CT tumor segmentation) -- external validation data source.
-
-Input: the Jordan University Hospital CT scans and their real tumor masks,
-as individual 2D DICOM slices. Output: matched (CT, mask) slice pairs for
-inference/validate_jordan_segmentation.py, the only consumer of this
-module. NEVER used for training (see PROJECT_NOTES.md's Stage 3 section for
-why: this dataset is small, 2D-only, and a different acquisition/format from
-the synthetic training data -- exactly the kind of held-out set that should
-only ever measure generalization, never influence it).
-
-Known, load-bearing limitations of this dataset (see PROJECT_NOTES.md for
-the full discussion -- summarized here since they directly shape this
-loader's design):
-
-1. **Format mismatch.** CT/mask files are RGB, 0-255, windowed
-   ("secondary capture" DICOM -- an already-rendered image, not raw HU
-   pixel data). There is no HU value to recover from an 8-bit windowed
-   screenshot, so this loader can only min-max normalize each slice to
-   itself (_normalize_jordan_ct below) -- structurally different from
-   Stage 3's training data (real HU, clipped to a fixed physical range).
-   Segmentation metrics computed against this data measure whether the
-   model's predicted SHAPE agrees with the real tumor outline, not whether
-   its intensity reasoning transfers -- it cannot be asked to, given the
-   input format.
-2. **Incomplete volumes.** Each patient has only the 1-6 tumor-containing
-   slices, not a full 3D volume -- there is no real 3D neighborhood to feed
-   a 3D model. See inference/validate_jordan_segmentation.py for how this
-   is worked around (slice replication) and why that's a real, flagged
-   approximation, not equivalent to genuine 3D context.
-3. **Filename matching is not guaranteed correct.** discover_jordan_slices
-   below matches CT and mask files purely by (patient_id, slice_num)
-   parsed from filenames in two separate directories -- there is no
-   cross-check that a matched pair actually depicts the same anatomical
-   slice beyond the filename convention holding. Any CT or mask file that
-   doesn't find a same-key partner is logged and excluded, never silently
-   guessed at.
-"""
+"""Stage 3 -- loads Jordan Hospital DICOM CT/mask slices; output: matched (CT, mask) 2D slice pairs for external validation only."""
 from __future__ import annotations
 
 import logging

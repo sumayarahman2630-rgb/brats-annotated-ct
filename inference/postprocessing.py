@@ -1,14 +1,4 @@
-"""STAGE 3 (CT tumor segmentation) -- optional post-processing utilities.
-
-Input: raw predicted probability volumes and (for threshold search) their
-ground-truth masks. Output: a cleaned-up binary mask (largest-component
-filtering) or a single global threshold value. Shared by both
-inference/validate_synthetic_segmentation.py and
-inference/validate_jordan_segmentation.py. Both are OPT-IN (disabled
-by default in both evaluation scripts): existing default behavior
-(threshold=0.5, no filtering) is unchanged unless explicitly requested via
-the scripts' --auto_threshold / --use_largest_component flags.
-"""
+"""Stage 3 -- optional post-processing (largest-component filtering, threshold search); output: a cleaned mask or a chosen threshold value."""
 from __future__ import annotations
 
 from typing import Callable

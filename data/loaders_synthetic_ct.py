@@ -1,31 +1,4 @@
-"""STAGE 3 (CT tumor segmentation) -- the training data source.
-
-Input: the synthetic CT + tumor mask pairs Stage 2
-(inference/run_stage2_brats_regression.py) generated. Output: train/val
-DataLoaders Stage 3's segmentation model trains on. This is the ONLY data
-source Stage 3 training uses; the Jordan hospital dataset
-(data/loaders_jordan_ct.py) is external validation only and is never
-touched by this module.
-
-Per-patient folder layout (matches Stage 2's output convention exactly):
-    <root>/<patient_id>/synthetic_ct.nii(.gz)
-    <root>/<patient_id>/tumor_mask.nii(.gz)
-The extension is matched flexibly (.nii or .nii.gz) since the exact Kaggle
-dataset the synthetic CT was re-uploaded as stores bare .nii, not the
-.nii.gz Stage 2 itself writes -- Kaggle's own dataset packaging appears to
-have decompressed it somewhere in that path, and this loader shouldn't
-care either way.
-
-Critical preprocessing step -- BINARIZATION: tumor_mask.nii is the
-ORIGINAL BraTS annotation, copied through Stage 2 unmodified (see
-run_stage2_brats_regression.py's "Known limitations"). BraTS labels are
-multi-class: 0=background, 1=NCR/NET, 2=ED, 4=ET (label 3 is never used).
-Stage 3 is binary tumor segmentation, not sub-region classification (out
-of scope for now, and the Jordan external validation masks are presumed
-binary too -- see PROJECT_NOTES.md's Stage 3 section) -- so every nonzero
-label is collapsed to 1 in _load_and_preprocess below, explicitly and
-before anything else touches the mask.
-"""
+"""Stage 3 -- loads Stage 2's synthetic CT + tumor mask pairs; output: train/val DataLoaders of preprocessed (ct, binary mask) tensors."""
 from __future__ import annotations
 
 import logging

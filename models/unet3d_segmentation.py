@@ -1,19 +1,4 @@
-"""STAGE 3 (CT tumor segmentation) -- the model.
-
-Input: a single-channel CT volume (real Jordan hospital scans at
-inference/validation, synthetic Stage 2 output at training time),
-normalized to [-1, 1]. Output: a single-channel per-voxel tumor
-probability map. Architecturally this is the exact same plain 3D
-encoder-decoder U-Net as models/unet3d_regression.py (Stage 1) -- same
-building blocks, just pointed at a different task. The loss (see
-training/train_stage3_segmentation.py) is computed by the caller, not
-here.
-
-This file shares no code with unet3d_regression.py on purpose. The
-building blocks (ConvBlock3D, Down3D, Up3D, _safe_num_groups) are
-duplicated rather than imported so that a change made for one stage's
-model can never accidentally leak into the other's.
-"""
+"""Stage 3 -- 3D segmentation U-Net; output: a per-voxel tumor probability map predicted from an input CT volume."""
 from __future__ import annotations
 
 import numpy as np
