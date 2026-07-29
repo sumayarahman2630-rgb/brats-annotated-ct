@@ -17,8 +17,15 @@
 # Full workflow this config is the last step of:
 #   1. python -m analysis.analyze_mask_quality --config configs/stage3_ct_segmentation.yaml \
 #          --output_csv /kaggle/working/analysis_plots/mask_quality.csv
-#   2. Train (or reuse an already-completed run of) configs/stage3_ct_segmentation.yaml --
-#      training.patient_loss_log is on by default, no extra flag needed.
+#   2. Get a patient_loss_log.csv. Two ways:
+#      a) Train (or resume/continue) configs/stage3_ct_segmentation.yaml --
+#         training.patient_loss_log is on by default, no extra flag needed.
+#      b) Already have a good checkpoint from BEFORE this feature existed and
+#         don't want to retrain? python -m analysis.compute_patient_loss_from_checkpoint
+#         --config configs/stage3_ct_segmentation.yaml computes the same CSV from
+#         that checkpoint's frozen weights (forward passes only -- provably never
+#         touches the checkpoint, see its own module docstring and tests). Pass
+#         --loss_tail_fraction 1.0 to build_exclude_list below when using this path.
 #   3. python -m analysis.build_exclude_list \
 #          --mask_quality_csv /kaggle/working/analysis_plots/mask_quality.csv \
 #          --patient_loss_csv /kaggle/working/logs/stage3_patient_loss_log.csv \
