@@ -37,11 +37,39 @@ class SyntheticCTPatient:
     mask_path: str
 
 
-def discover_synthetic_ct_patients(root: str) -> list[SyntheticCTPatient]:
+def load_exclude_list(path: str | None) -> set[str]:
+    """Reads a plain-text exclude list -- one patient_id per line, blank
+    lines and lines starting with '#' ignored -- and returns the set of
+    IDs to drop. Returns an empty set if path is None (the default,
+    meaning "exclude nobody"), matching how every other optional path in
+    this project's configs behaves when left unset. Doesn't validate the
+    IDs against any discovered patient list itself -- discover_synthetic_ct_patients
+    below logs how many of these actually matched something, so a typo'd
+    ID doesn't silently do nothing."""
+    if not path:
+        return set()
+    ids = set()
+    with open(path) as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if line:
+                ids.add(line)
+    return ids
+
+
+def discover_synthetic_ct_patients(root: str, exclude_patient_ids: set[str] | None = None) -> list[SyntheticCTPatient]:
     """root's immediate children are Stage-2-output patient folders. Content-based
     validation (a folder qualifies only if both files are actually present),
     same robustness pattern as data/loaders_synthrad.py's discover_synthrad_patients
-    -- any stray non-patient folder is excluded the same way, no name denylist."""
+    -- any stray non-patient folder is excluded the same way, no name denylist.
+
+    `exclude_patient_ids` (from load_exclude_list, typically built by
+    analysis/build_exclude_list.py) drops matching patients from the pool
+    entirely -- before the train/val split, so an excluded patient never
+    ends up in either. That's deliberate: the premise for excluding a
+    patient here is that its Stage 2 output itself is suspect, which would
+    make it just as unreliable as a validation target as it is as a
+    training example."""
     root_path = Path(root)
     if not root_path.is_dir():
         log.warning("discover_synthetic_ct_patients: %s is not a directory", root_path)
@@ -81,6 +109,23 @@ def discover_synthetic_ct_patients(root: str) -> list[SyntheticCTPatient]:
             "No synthetic CT patients found under %s. Check data.synthetic_ct_root "
             "in the config against the actual Kaggle input path.", root_path,
         )
+
+    if exclude_patient_ids:
+        before = len(patients)
+        matched = {p.patient_id for p in patients} & exclude_patient_ids
+        patients = [p for p in patients if p.patient_id not in exclude_patient_ids]
+        log.info(
+            "discover_synthetic_ct_patients: exclude list removed %d of %d patients (%d -> %d remaining)",
+            len(matched), before, before, len(patients),
+        )
+        unmatched = exclude_patient_ids - matched
+        if unmatched:
+            log.warning(
+                "discover_synthetic_ct_patients: %d ID(s) in the exclude list matched no discovered "
+                "patient (typo, or a different synthetic_ct_root than the one the list was built "
+                "from?): %s", len(unmatched), sorted(unmatched),
+            )
+
     return patients
 
 
@@ -196,7 +241,8 @@ def build_synthetic_ct_dataloaders(config: dict, seed: int = 0) -> tuple[DataLoa
     kept at full-volume resolution so validation Dice/IoU reflect the whole
     brain, not one random patch per check."""
     data_cfg = config["data"]
-    patients = discover_synthetic_ct_patients(data_cfg["synthetic_ct_root"])
+    exclude_ids = load_exclude_list(data_cfg.get("exclude_patients_file"))
+    patients = discover_synthetic_ct_patients(data_cfg["synthetic_ct_root"], exclude_patient_ids=exclude_ids)
     if not patients:
         raise RuntimeError(
             f"No synthetic CT patients discovered under {data_cfg['synthetic_ct_root']!r}. "

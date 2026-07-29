@@ -250,6 +250,96 @@ def combined_loss(
         raise ValueError(f"Unknown training.loss_type {loss_type!r} -- expected one of: dice_bce, tversky, focal_tversky, focal.")
 
 
+def per_sample_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    bce_weight: float,
+    loss_type: str = "dice_bce",
+    tversky_alpha: float = 0.3,
+    tversky_beta: float = 0.7,
+    focal_gamma: float = 2.0,
+    focal_alpha: float = 0.25,
+) -> torch.Tensor:
+    """Same math as combined_loss, but returns one loss value per sample in
+    the batch (shape (batch,)) instead of the batch mean -- this is what
+    the per-patient loss log below attributes to each patient_id, since
+    training.batch_size can be > 1 and combined_loss's single scalar can't
+    be split back out after the fact.
+
+    Deliberately a SEPARATE function, not a refactor of combined_loss to
+    optionally skip its final .mean(): duplicating the ~10 lines of math
+    means a bug or future change here can never alter what's actually
+    backpropagated, and vice versa -- the same reasoning this project
+    already applies to every other piece of per-stage duplicated logic.
+    Every call site passes detached tensors under torch.no_grad(), so this
+    adds bookkeeping cost but never touches the training graph.
+
+    Exactly equal to combined_loss(...).item() averaged back out per
+    sample WHEN every sample in the batch has the same shape (always true
+    here -- training patches all use data.patch_size, and
+    build_synthetic_ct_dataloaders already refuses batch_size > 1 without
+    a fixed patch_size). The equal-shape requirement matters because
+    combined_loss's BCE/focal branches use PyTorch's default 'mean'
+    reduction, which averages over every voxel across the WHOLE batch --
+    that only equals the mean of each sample's own per-voxel mean when
+    every sample contributes the same number of voxels.
+    """
+    probs = torch.sigmoid(logits)
+    probs_flat = probs.reshape(probs.shape[0], -1)
+    target_flat = target.reshape(target.shape[0], -1)
+
+    if loss_type == "dice_bce":
+        intersection = (probs_flat * target_flat).sum(dim=1)
+        union = probs_flat.sum(dim=1) + target_flat.sum(dim=1)
+        dice_per_sample = 1.0 - (2.0 * intersection + 1.0) / (union + 1.0)
+        bce_per_sample = F.binary_cross_entropy_with_logits(logits, target, reduction="none").reshape(logits.shape[0], -1).mean(dim=1)
+        return dice_per_sample + bce_weight * bce_per_sample
+    elif loss_type in ("tversky", "focal_tversky"):
+        tp = (probs_flat * target_flat).sum(dim=1)
+        fp = (probs_flat * (1.0 - target_flat)).sum(dim=1)
+        fn = ((1.0 - probs_flat) * target_flat).sum(dim=1)
+        tversky_index = (tp + 1.0) / (tp + tversky_alpha * fp + tversky_beta * fn + 1.0)
+        if loss_type == "tversky":
+            return 1.0 - tversky_index
+        return (1.0 - tversky_index) ** 0.75  # matches focal_tversky_loss's default gamma -- combined_loss never overrides it
+    elif loss_type == "focal":
+        bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+        p_t = torch.exp(-bce)
+        alpha_t = focal_alpha * target + (1.0 - focal_alpha) * (1.0 - target)
+        focal_weight = alpha_t * (1.0 - p_t) ** focal_gamma
+        return (focal_weight * bce).reshape(logits.shape[0], -1).mean(dim=1)
+    else:
+        raise ValueError(f"Unknown training.loss_type {loss_type!r} -- expected one of: dice_bce, tversky, focal_tversky, focal.")
+
+
+PATIENT_LOSS_LOG_FIELDS = ["step", "patient_id", "loss"]
+
+
+def init_patient_loss_log(path: str, resuming: bool) -> None:
+    """Same resumability convention as init_log_file: keep and append to an
+    existing file on resume, otherwise start fresh with just a header."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    if resuming and os.path.exists(path):
+        return
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(PATIENT_LOSS_LOG_FIELDS)
+
+
+def append_patient_loss_rows(path: str, rows: list[tuple[int, str, float]]) -> None:
+    """Appends a batch of (step, patient_id, loss) rows at once -- the
+    training loop buffers these in memory and flushes at the same cadence
+    as the main log_interval, rather than opening the file every single
+    step (at batch_size=2 and total_steps=20000, that would be up to
+    40000 separate file opens over a run)."""
+    if not rows:
+        return
+    with open(path, "a", newline="") as f:
+        writer = csv.writer(f)
+        for step, patient_id, loss in rows:
+            writer.writerow([step, patient_id, f"{loss:.6f}"])
+
+
 def init_log_file(path: str, resuming: bool) -> None:
     """Create the CSV training log with a header row, unless resuming an
     existing run (in which case the existing file/header is kept and new
@@ -444,6 +534,16 @@ def main():
     log_file = train_cfg["log_file"]
     init_log_file(log_file, resuming=global_step > 0)
 
+    # Defaults to a sibling of log_file rather than requiring every existing config
+    # to add this key -- see per_sample_loss's docstring for why this is tracked at
+    # all: it's what analysis/build_exclude_list.py combines with
+    # analysis/analyze_mask_quality.py's mask-geometry audit to flag patients whose
+    # Stage 2 output is both statistically unusual AND consistently hard for the
+    # model to learn from.
+    patient_loss_log = train_cfg.get("patient_loss_log", os.path.join(os.path.dirname(log_file) or ".", "patient_loss_log.csv"))
+    init_patient_loss_log(patient_loss_log, resuming=global_step > 0)
+    pending_patient_loss_rows: list[tuple[int, str, float]] = []
+
     checkpoint_interval = train_cfg["checkpoint_interval"]
     log_interval = train_cfg.get("log_interval", 25)
     val_interval = train_cfg.get("val_interval", checkpoint_interval)
@@ -523,12 +623,27 @@ def main():
 
         global_step += 1
 
+        # Per-patient loss bookkeeping (see per_sample_loss's docstring): computed
+        # every step on detached tensors, so this can never influence gradients --
+        # it's captured every step (not just at log_interval) so a patient sampled
+        # only a handful of times over a run still gets a real per-patient average
+        # rather than being undersampled down to almost nothing. Only the actual
+        # file WRITE is batched to log_interval, same I/O cadence as the main log.
+        with torch.no_grad():
+            sample_losses = per_sample_loss(logits.detach().float(), mask.float(), **loss_kwargs)
+        patient_ids_this_step = batch["patient_id"] if isinstance(batch["patient_id"], list) else [batch["patient_id"]]
+        pending_patient_loss_rows.extend(
+            (global_step, pid, sample_loss) for pid, sample_loss in zip(patient_ids_this_step, sample_losses.tolist())
+        )
+
         if global_step % log_interval == 0 or global_step == total_steps:
             elapsed = time.time() - t_start
             lr = scheduler.get_last_lr()[0]
             train_dice = dice_score(torch.sigmoid(logits.detach().float()), mask.float())
             log.info("step %d/%d | loss=%.5f | dice=%.4f | lr=%.6f | elapsed=%.1fs", global_step, total_steps, loss.item(), train_dice, lr, elapsed)
             append_log_row(log_file, global_step, "train", loss.item(), train_dice, lr, elapsed)
+            append_patient_loss_rows(patient_loss_log, pending_patient_loss_rows)
+            pending_patient_loss_rows.clear()
 
         # Checkpoint BEFORE validation, deliberately -- see Stage 1's
         # train_stage1_regression.py for the real-Kaggle bug this ordering fixes.

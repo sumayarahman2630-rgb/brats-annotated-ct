@@ -1,0 +1,92 @@
+# STAGE 3 (CT tumor segmentation) -- filtered-retrain config.
+#
+# Input: the same synthetic CT + tumor mask pairs as configs/stage3_ct_segmentation.yaml,
+# minus whatever analysis/build_exclude_list.py flagged in data.exclude_patients_file
+# below. Output: a checkpoint + logs in their OWN directory, kept separate from the
+# original (unfiltered) run's so a resume can never accidentally mix the two runs'
+# checkpoints or silently inherit the old run's higher step count.
+#
+# This is stage3_ct_segmentation.yaml with exactly three things changed:
+# data.exclude_patients_file, checkpoint.working_dir, and the two training log
+# paths. Every hyperparameter (model, loss, lr, schedule, augmentation) is left
+# IDENTICAL on purpose -- the point of this config is to isolate "same setup,
+# filtered data" as the only variable, so the before/after internal + external
+# Dice comparison (inference/generate_full_report.py, run against both
+# checkpoint dirs) actually measures what filtering changed and nothing else.
+#
+# Full workflow this config is the last step of:
+#   1. python -m analysis.analyze_mask_quality --config configs/stage3_ct_segmentation.yaml \
+#          --output_csv /kaggle/working/analysis_plots/mask_quality.csv
+#   2. Train (or reuse an already-completed run of) configs/stage3_ct_segmentation.yaml --
+#      training.patient_loss_log is on by default, no extra flag needed.
+#   3. python -m analysis.build_exclude_list \
+#          --mask_quality_csv /kaggle/working/analysis_plots/mask_quality.csv \
+#          --patient_loss_csv /kaggle/working/logs/stage3_patient_loss_log.csv \
+#          --output_exclude_list /kaggle/working/analysis_plots/stage3_exclude_list.txt
+#      -- review the printed summary and the companion _report.csv before proceeding.
+#   4. python -m training.train_stage3_segmentation --config configs/stage3_ct_segmentation_filtered.yaml
+
+seed: 42
+
+data:
+  synthetic_ct_root: "/kaggle/input/datasets/sumayarahmanmeherin/annoted-sct/kaggle/input/notebooks/sumayarahmanmeherin/mri-to-ct/synthetic_ct_dataset_regression"
+  jordan_ct_root: "/kaggle/input/datasets/sumayarahmanmeherin/annoted-20-ct"
+  jordan_mask_root: "/kaggle/input/datasets/sumayarahmanmeherin/mask-data-20"
+
+  ct_clip_range: [-1000.0, 3000.0]
+  crop_margin: 10
+  spatial_multiple: 16
+  patch_size: [96, 96, 64]
+  foreground_prob: 0.5
+  max_patients: null
+  # THE point of this config -- see analysis/build_exclude_list.py's module
+  # docstring for how this file gets generated and why --strategy intersection
+  # is the recommended, more conservative default.
+  exclude_patients_file: "/kaggle/working/analysis_plots/stage3_exclude_list.txt"
+  train_val_split: 0.9
+  num_workers: 4
+  augment: true
+  flip_prob: 0.5
+  rot90_prob: 0.5
+  intensity_jitter_std: 0.05
+
+model:
+  base_channels: 32
+  channel_mult: [1, 2, 4, 8]
+  num_groups: 8
+
+training:
+  batch_size: 2
+  lr: 0.0002
+  weight_decay: 0.00001
+  lr_schedule: "cosine"
+  warmup_steps: 200
+  total_steps: 20000
+  loss_type: "focal"
+  bce_weight: 1.0
+  tversky_alpha: 0.3
+  tversky_beta: 0.7
+  focal_gamma: 2.0
+  focal_alpha: 0.75
+  amp: true
+  grad_clip_norm: 1.0
+  ema_decay: 0.999
+  log_interval: 25
+  val_interval: 1000
+  val_max_patients: 5
+  checkpoint_interval: 1000
+  keep_last_n_checkpoints: 3
+  # New paths -- deliberately NOT stage3_segmentation_log.csv / stage3_patient_loss_log.csv
+  # (the unfiltered run's files), so this run's log can't get appended onto the old
+  # run's rows or accidentally truncate them.
+  log_file: "/kaggle/working/logs/stage3_segmentation_filtered_log.csv"
+  patient_loss_log: "/kaggle/working/logs/stage3_patient_loss_log_filtered.csv"
+
+checkpoint:
+  # New directory -- separate from checkpoint.working_dir in stage3_ct_segmentation.yaml
+  # on purpose: training/train_stage3_segmentation.py auto-resumes from whatever
+  # checkpoint has the highest step number in this directory, and the unfiltered
+  # run's checkpoints are trained on a DIFFERENT (unfiltered) patient pool -- resuming
+  # from one into the other would silently mix the two datasets mid-training.
+  working_dir: "/kaggle/working/checkpoints/stage3_segmentation_filtered"
+  extra_resume_dirs: []

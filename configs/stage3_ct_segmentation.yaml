@@ -38,6 +38,14 @@ data:
   # would mostly yield empty-mask patches and a weak Dice gradient signal.
   foreground_prob: 0.5
   max_patients: null
+  # Optional: path to a plain-text file (one patient_id per line, '#' comments
+  # and blank lines ignored) of patients to drop from the ENTIRE pool -- train
+  # and val both -- before the train/val split happens. See
+  # analysis/build_exclude_list.py, which generates a file in this format from
+  # analyze_mask_quality.py's mask-geometry audit plus this run's own
+  # training.patient_loss_log. null (the default) excludes nobody, i.e.
+  # unchanged current behavior.
+  exclude_patients_file: null
   train_val_split: 0.9                 # patient-level split, no leakage -- same algorithm as Stage 1
   num_workers: 4
   # Training-time augmentation, added 2026-07-24 for tonight's retrain -- applied to TRAIN
@@ -138,6 +146,10 @@ training:
   checkpoint_interval: 1000
   keep_last_n_checkpoints: 3
   log_file: "/kaggle/working/logs/stage3_segmentation_log.csv"
+  # Per-(step, patient_id) training loss, captured every step -- the raw input
+  # analysis/build_exclude_list.py aggregates into a per-patient average. Optional
+  # key: if omitted, defaults to patient_loss_log.csv alongside log_file above.
+  patient_loss_log: "/kaggle/working/logs/stage3_patient_loss_log.csv"
 
 checkpoint:
   working_dir: "/kaggle/working/checkpoints/stage3_segmentation"   # separate from Stage 1/2's checkpoint dirs -- never collides

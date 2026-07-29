@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 import yaml
 
-from data.loaders_synthetic_ct import build_synthetic_ct_dataloaders, discover_synthetic_ct_patients
+from data.loaders_synthetic_ct import build_synthetic_ct_dataloaders, discover_synthetic_ct_patients, load_exclude_list
 from data.preprocessing import foreground_biased_patch_crop
 from models.unet3d_segmentation import build_segmentation_model
 from training.train_stage3_segmentation import (
@@ -102,6 +102,62 @@ def test_patient_level_split_has_no_leakage(tmp_path):
     assert len(train_ids) + len(val_ids) == 8
     assert train_loader.dataset.patch_size == (8, 8, 8)
     assert val_loader.dataset.patch_size is None  # full-volume val, same convention as Stage 1
+
+
+def test_load_exclude_list_parses_ids_ignoring_comments_and_blank_lines(tmp_path):
+    path = tmp_path / "exclude.txt"
+    path.write_text("P001\n# a comment about why P002 is excluded\nP002\n\n  P003  \n# P004 is commented out, should NOT be excluded\n")
+    ids = load_exclude_list(str(path))
+    assert ids == {"P001", "P002", "P003"}
+
+
+def test_load_exclude_list_returns_empty_set_for_none():
+    assert load_exclude_list(None) == set()
+
+
+def test_discover_synthetic_ct_patients_drops_excluded_ids_and_warns_on_unmatched(tmp_path, caplog):
+    root = tmp_path / "fake_synthetic_ct"
+    _write_fake_synthetic_ct(root, [f"P{i:03d}" for i in range(5)])
+    import logging
+    with caplog.at_level(logging.WARNING):
+        patients = discover_synthetic_ct_patients(str(root), exclude_patient_ids={"P001", "P003", "NOT_A_REAL_PATIENT"})
+    remaining_ids = {p.patient_id for p in patients}
+    assert remaining_ids == {"P000", "P002", "P004"}
+    assert any("NOT_A_REAL_PATIENT" in message for message in caplog.messages)
+
+
+def test_build_synthetic_ct_dataloaders_excludes_patients_from_both_splits(tmp_path):
+    """An excluded patient must vanish from the WHOLE pool -- neither train
+    nor val -- since the premise for excluding it is that its Stage 2
+    output itself is suspect, which would make it just as unreliable as a
+    validation target as a training example."""
+    root = tmp_path / "fake_synthetic_ct"
+    patient_ids = [f"P{i:03d}" for i in range(8)]
+    _write_fake_synthetic_ct(root, patient_ids)
+    exclude_path = tmp_path / "exclude.txt"
+    exclude_path.write_text("P002\nP005\n")
+
+    config = _base_config(tmp_path, root, patch_size=[8, 8, 8])
+    config["data"]["exclude_patients_file"] = str(exclude_path)
+    train_loader, val_loader = build_synthetic_ct_dataloaders(config, seed=0)
+
+    train_ids = {p.patient_id for p in train_loader.dataset.patients}
+    val_ids = {p.patient_id for p in val_loader.dataset.patients}
+    assert "P002" not in train_ids and "P002" not in val_ids
+    assert "P005" not in train_ids and "P005" not in val_ids
+    assert len(train_ids) + len(val_ids) == 6
+
+
+def test_build_synthetic_ct_dataloaders_with_no_exclude_file_behaves_unchanged(tmp_path):
+    """data.exclude_patients_file omitted (or null) must be a pure no-op --
+    every discovered patient still ends up in the pool, exactly as before
+    this feature existed."""
+    root = tmp_path / "fake_synthetic_ct"
+    _write_fake_synthetic_ct(root, [f"P{i:03d}" for i in range(6)])
+    config = _base_config(tmp_path, root, patch_size=[8, 8, 8])
+    assert "exclude_patients_file" not in config["data"]
+    train_loader, val_loader = build_synthetic_ct_dataloaders(config, seed=0)
+    assert len(train_loader.dataset.patients) + len(val_loader.dataset.patients) == 6
 
 
 def test_foreground_biased_crop_finds_small_tumor_reliably():
@@ -408,3 +464,51 @@ def test_combined_loss_is_non_finite_when_logits_contain_nan():
     ]:
         loss = combined_loss(logits, target, bce_weight=1.0, loss_type=loss_type, **kwargs)
         assert not torch.isfinite(loss), f"expected non-finite loss for loss_type={loss_type!r}, got {loss.item()}"
+
+
+def test_filtered_config_matches_base_config_except_for_the_intentional_paths():
+    """configs/stage3_ct_segmentation_filtered.yaml exists to isolate 'same
+    setup, filtered data' as the only variable in a before/after Dice
+    comparison -- if a future edit to the base config (e.g. a hyperparameter
+    tweak) doesn't get mirrored into the filtered one, that guarantee
+    silently breaks. This test fails loudly instead of letting the two
+    configs drift apart unnoticed."""
+    repo_root = Path(__file__).resolve().parents[1]
+    with open(repo_root / "configs" / "stage3_ct_segmentation.yaml") as f:
+        base = yaml.safe_load(f)
+    with open(repo_root / "configs" / "stage3_ct_segmentation_filtered.yaml") as f:
+        filtered = yaml.safe_load(f)
+
+    # These are the ONLY keys allowed to differ, and why:
+    allowed_diffs = {
+        ("data", "exclude_patients_file"),   # the entire point of this config
+        ("checkpoint", "working_dir"),        # separate checkpoint dir -- see the config's own comment for why
+        ("training", "log_file"),             # separate log -- must not append onto/truncate the unfiltered run's
+        ("training", "patient_loss_log"),     # separate log -- same reason
+    }
+
+    def flatten(d, prefix=()):
+        for k, v in d.items():
+            path = prefix + (k,)
+            if isinstance(v, dict):
+                yield from flatten(v, path)
+            else:
+                yield path, v
+
+    base_flat = dict(flatten(base))
+    filtered_flat = dict(flatten(filtered))
+
+    assert set(base_flat.keys()) == set(filtered_flat.keys()), (
+        f"the two configs have different keys entirely: "
+        f"only in base={set(base_flat) - set(filtered_flat)}, only in filtered={set(filtered_flat) - set(base_flat)}"
+    )
+
+    unexpected_diffs = {
+        path: (base_flat[path], filtered_flat[path])
+        for path in base_flat
+        if base_flat[path] != filtered_flat[path] and path not in allowed_diffs
+    }
+    assert not unexpected_diffs, f"unexpected drift between the base and filtered configs: {unexpected_diffs}"
+
+    for path in allowed_diffs - {("data", "exclude_patients_file")}:
+        assert base_flat[path] != filtered_flat[path], f"{path} was expected to differ between the two configs but doesn't"
