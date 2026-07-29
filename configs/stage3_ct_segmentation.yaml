@@ -19,14 +19,23 @@ data:
   # unusually deep path -- this is Kaggle's own nesting from how the dataset
   # was originally exported, not something to "fix"; data/loaders_synthetic_ct.py
   # just needs the exact path to the directory whose immediate children are
-  # per-patient folders.
-  synthetic_ct_root: "/kaggle/input/datasets/sumayarahmanmeherin/annoted-sct/kaggle/input/notebooks/sumayarahmanmeherin/mri-to-ct/synthetic_ct_dataset_regression"
+  # per-patient folders. Confirmed 2026-07-30 directly from the Kaggle file
+  # browser: the dataset mounts as plain /kaggle/input/annoted-sct/... (no
+  # "datasets/<username>/" prefix -- that prefix is only added when a dataset
+  # is referenced via its API/URL path, not when attached through "Add Data").
+  synthetic_ct_root: "/kaggle/input/annoted-sct/kaggle/input/notebooks/sumayarahmanmeherin/mri-to-ct/synthetic_ct_dataset_regression"
   # Jordan University Hospital external validation set (20 patients, CT and
   # mask as separate flat directories of RGB DICOM slices) -- read only by
   # inference/validate_jordan_segmentation.py, listed here so both the
   # training config and the validation script share one source of truth.
-  jordan_ct_root: "/kaggle/input/datasets/sumayarahmanmeherin/annoted-20-ct"
-  jordan_mask_root: "/kaggle/input/datasets/sumayarahmanmeherin/mask-data-20"
+  # Same prefix fix as synthetic_ct_root above -- unverified for these two
+  # specifically (only synthetic_ct_root's mount was directly confirmed via
+  # the Kaggle file browser), but attached the same way ("Add Data" sidebar,
+  # same session) so almost certainly mounts the same way. Worth a quick
+  # `!ls /kaggle/input/annoted-20-ct` / `!ls /kaggle/input/mask-data-20`
+  # sanity check before trusting this blindly.
+  jordan_ct_root: "/kaggle/input/annoted-20-ct"
+  jordan_mask_root: "/kaggle/input/mask-data-20"
 
   ct_clip_range: [-1000.0, 3000.0]     # same HU clip range as Stage 1 -- synthetic CT was generated under this same convention
   crop_margin: 10
