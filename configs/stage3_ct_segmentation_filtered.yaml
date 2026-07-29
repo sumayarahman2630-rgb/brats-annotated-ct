@@ -36,11 +36,14 @@
 seed: 42
 
 data:
-  # Confirmed 2026-07-30 via the Kaggle file browser -- see stage3_ct_segmentation.yaml's
-  # data section comments for the full "datasets/<username>/ prefix" explanation.
-  synthetic_ct_root: "/kaggle/input/annoted-sct/kaggle/input/notebooks/sumayarahmanmeherin/mri-to-ct/synthetic_ct_dataset_regression"
-  jordan_ct_root: "/kaggle/input/annoted-20-ct"
-  jordan_mask_root: "/kaggle/input/mask-data-20"
+  # Confirmed 2026-07-30 by walking the mount directly -- see stage3_ct_segmentation.yaml's
+  # data section comments for the full explanation (mounts under
+  # /kaggle/input/datasets/<current account>/<slug>/..., and the
+  # "sumayarahmanmeherin" inside synthetic_ct_root is baked into the
+  # dataset's own content, unrelated to who attached it now).
+  synthetic_ct_root: "/kaggle/input/datasets/sumayarahman30/annoted-sct/kaggle/input/notebooks/sumayarahmanmeherin/mri-to-ct/synthetic_ct_dataset_regression"
+  jordan_ct_root: "/kaggle/input/datasets/sumayarahman30/annoted-20-ct"
+  jordan_mask_root: "/kaggle/input/datasets/sumayarahman30/mask-data-20"
 
   ct_clip_range: [-1000.0, 3000.0]
   crop_margin: 10
