@@ -11,6 +11,8 @@ import pydicom
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from data.kaggle_paths import resolve_kaggle_dataset_path
+
 log = logging.getLogger(__name__)
 
 _CT_RE = re.compile(r"^(.*)_CT_s(\d+)\.dcm$", re.IGNORECASE)
@@ -35,8 +37,13 @@ def discover_jordan_slices(ct_root: str, mask_root: str) -> list[JordanSlice]:
     warning with its exact filename, not silently dropped or guessed at --
     the matching depends entirely on the filename convention holding,
     which is exactly the "not guaranteed" risk flagged in the module
-    docstring."""
-    ct_root, mask_root = Path(ct_root), Path(mask_root)
+    docstring.
+
+    Both roots are passed through resolve_kaggle_dataset_path first -- see
+    that function's docstring for why: the /kaggle/input/datasets/<username>/...
+    mount path's username segment has been observed to change between
+    Kaggle sessions for the same attached dataset."""
+    ct_root, mask_root = Path(resolve_kaggle_dataset_path(ct_root)), Path(resolve_kaggle_dataset_path(mask_root))
 
     ct_by_key: dict[tuple[str, int], str] = {}
     for f in sorted(ct_root.iterdir()) if ct_root.is_dir() else []:

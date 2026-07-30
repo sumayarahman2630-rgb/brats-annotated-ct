@@ -11,6 +11,7 @@ import SimpleITK as sitk
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from data.kaggle_paths import resolve_kaggle_dataset_path
 from data.preprocessing import (
     CT_BACKGROUND_HU,
     augment_ct_mask_patch,
@@ -69,7 +70,13 @@ def discover_synthetic_ct_patients(root: str, exclude_patient_ids: set[str] | No
     ends up in either. That's deliberate: the premise for excluding a
     patient here is that its Stage 2 output itself is suspect, which would
     make it just as unreliable as a validation target as it is as a
-    training example."""
+    training example.
+
+    `root` is passed through resolve_kaggle_dataset_path first -- see that
+    function's docstring for why: the /kaggle/input/datasets/<username>/...
+    mount path's username segment has been observed to change between
+    Kaggle sessions for the same attached dataset."""
+    root = resolve_kaggle_dataset_path(root)
     root_path = Path(root)
     if not root_path.is_dir():
         log.warning("discover_synthetic_ct_patients: %s is not a directory", root_path)

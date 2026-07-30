@@ -27,25 +27,25 @@ data:
   # in this environment -- there is no plain /kaggle/input/<slug>/... form
   # here (an earlier guess assumed there was; it was wrong). The username
   # segment is the account that attached the dataset THIS session
-  # (sumayarahman30), which is NOT the same as "sumayarahmanmeherin" still
+  # (sumayarahmanmeherin), which is NOT the same as "sumayarahmanmeherin" still
   # baked into the path below -- that second occurrence is inside the
   # dataset's own content (how it was originally exported/zipped by a
   # different, earlier account/notebook) and has nothing to do with who
   # attached it now. Don't "fix" it to match the outer username if this
   # path ever needs touching again.
-  synthetic_ct_root: "/kaggle/input/datasets/sumayarahman30/annoted-sct/kaggle/input/notebooks/sumayarahmanmeherin/mri-to-ct/synthetic_ct_dataset_regression"
+  synthetic_ct_root: "/kaggle/input/datasets/sumayarahmanmeherin/annoted-sct/kaggle/input/notebooks/sumayarahmanmeherin/mri-to-ct/synthetic_ct_dataset_regression"
   # Jordan University Hospital external validation set (20 patients, CT and
   # mask as separate flat directories of RGB DICOM slices) -- read only by
   # inference/validate_jordan_segmentation.py, listed here so both the
   # training config and the validation script share one source of truth.
   # Same /kaggle/input/datasets/<username>/<slug> mount pattern as
   # synthetic_ct_root above -- confirmed to exist at this level (`!ls
-  # /kaggle/input/datasets/sumayarahman30/` listed annoted-20-ct and
+  # /kaggle/input/datasets/sumayarahmanmeherin/` listed annoted-20-ct and
   # mask-data-20 directly), though their internal content wasn't walked
   # any deeper (PROJECT_NOTES.md describes them as flat DICOM directories
   # with no further nesting expected).
-  jordan_ct_root: "/kaggle/input/datasets/sumayarahman30/annoted-20-ct"
-  jordan_mask_root: "/kaggle/input/datasets/sumayarahman30/mask-data-20"
+  jordan_ct_root: "/kaggle/input/datasets/sumayarahmanmeherin/annoted-20-ct"
+  jordan_mask_root: "/kaggle/input/datasets/sumayarahmanmeherin/mask-data-20"
 
   ct_clip_range: [-1000.0, 3000.0]     # same HU clip range as Stage 1 -- synthetic CT was generated under this same convention
   crop_margin: 10
