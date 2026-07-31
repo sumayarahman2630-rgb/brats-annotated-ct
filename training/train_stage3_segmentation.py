@@ -556,6 +556,11 @@ def main():
     t_start = time.time()
     autocast_ctx = (lambda: torch.amp.autocast("cuda", enabled=amp_enabled)) if device.type == "cuda" else (lambda: nullcontext())
 
+    # Tracks consecutive non-finite-loss skips (reset to 0 on every successful step)
+    # -- see the non-finite-loss branch below for why this exists.
+    consecutive_non_finite_skips = 0
+    max_consecutive_non_finite_skips = train_cfg.get("max_consecutive_non_finite_skips", 20)
+
     while global_step < total_steps:
         batch = train_cycle.next()
         ct, mask = batch["ct"].to(device, non_blocking=True), batch["mask"].to(device, non_blocking=True)
@@ -596,7 +601,34 @@ def main():
                 "NaN/Inf voxel (a bad Stage 2 output would explain a persistently-triggering patient).",
                 global_step, loss.item(), batch["patient_id"],
             )
+            consecutive_non_finite_skips += 1
+            if consecutive_non_finite_skips >= max_consecutive_non_finite_skips:
+                # A handful of consecutive skips could plausibly be a run of individually
+                # bad patients (e.g. a corrupted Stage 2 output the exclude-list tooling
+                # hasn't caught yet). max_consecutive_non_finite_skips (default 20)
+                # different, essentially-random patient batches ALL producing a
+                # non-finite loss in a row is a different situation: the model's
+                # weights themselves are almost certainly in a state where the forward
+                # pass overflows for ANY input, not any specific patient's data (real
+                # case seen 2026-07-31: 20000-step run stuck at one step number for
+                # dozens of consecutive skips across entirely different patients, never
+                # recovering -- previously this would have silently run forever,
+                # logging "skipping this step" while making zero real progress, until
+                # something external noticed). Raising here turns that silent freeze
+                # into a fast, visible failure -- and specifically into a NONZERO EXIT,
+                # so scripts/train_stage3_watchdog.py detects it as a crash and
+                # restarts from the last checkpoint within seconds, not the 15 minutes
+                # its stall-timeout would otherwise take to notice zero new log rows.
+                raise RuntimeError(
+                    f"step {global_step}: {consecutive_non_finite_skips} consecutive non-finite-loss "
+                    "skips across different patients -- the model's weights are very likely no longer "
+                    "numerically usable (not a specific bad patient; see the comment above this raise). "
+                    "Stopping so a restart/resume can recover from the last good checkpoint instead of "
+                    "burning compute on a permanently broken model."
+                )
             continue
+
+        consecutive_non_finite_skips = 0
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)

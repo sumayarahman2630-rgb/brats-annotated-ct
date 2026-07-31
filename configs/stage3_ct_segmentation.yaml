@@ -159,6 +159,13 @@ training:
   amp: true
   grad_clip_norm: 1.0
   ema_decay: 0.999                      # EMA state saved for reference only -- inference/validate_jordan_segmentation.py always evaluates RAW weights, same anti-contamination pattern as Stage 1
+  # Added 2026-07-31 after a real run got permanently stuck at one step number, logging
+  # "non-finite loss, skipping" across dozens of consecutive, entirely different patients
+  # with no recovery -- the model's weights themselves had become unusable, not any one
+  # patient's data. This many consecutive skips in a row now raises (instead of looping
+  # forever) so scripts/train_stage3_watchdog.py's crash-detection restarts from the last
+  # checkpoint within seconds, not the ~15 minutes its stall-timeout would otherwise take.
+  max_consecutive_non_finite_skips: 20
   log_interval: 25
   val_interval: 1000
   val_max_patients: 5                   # cap on the periodic in-training validation pass (full-volume, so this stays cheap)

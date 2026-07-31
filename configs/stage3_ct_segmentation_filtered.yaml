@@ -83,6 +83,7 @@ training:
   amp: true
   grad_clip_norm: 1.0
   ema_decay: 0.999
+  max_consecutive_non_finite_skips: 20
   log_interval: 25
   val_interval: 1000
   val_max_patients: 5

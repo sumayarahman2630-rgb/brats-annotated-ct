@@ -512,3 +512,47 @@ def test_filtered_config_matches_base_config_except_for_the_intentional_paths():
 
     for path in allowed_diffs - {("data", "exclude_patients_file")}:
         assert base_flat[path] != filtered_flat[path], f"{path} was expected to differ between the two configs but doesn't"
+
+
+def test_training_stops_after_max_consecutive_non_finite_skips(tmp_path, monkeypatch):
+    """Real failure mode found 2026-07-31: a run got permanently stuck at
+    one step number, logging 'non-finite loss, skipping' across dozens of
+    consecutive, entirely different patients, never recovering -- the
+    model's weights themselves had gone unusable, not any one patient's
+    data. Training must now raise (and exit nonzero) instead of looping
+    forever once max_consecutive_non_finite_skips is hit, so
+    scripts/train_stage3_watchdog.py's crash detection can restart from
+    the last checkpoint quickly instead of waiting out its stall timeout.
+
+    Forces the non-finite condition by monkeypatching combined_loss itself
+    rather than writing NaN into a fixture's CT/mask files: SimpleITK's
+    NIfTI writer silently sanitizes NaN to 0.0 on write (see
+    test_combined_loss_is_non_finite_when_logits_contain_nan's docstring
+    elsewhere in this file), so a NaN written into the fake data never
+    actually survives to be read back -- confirmed the hard way here, where
+    an earlier version
+    of this test using that approach just trained normally to completion
+    on ordinary, silently-sanitized-finite data instead of ever triggering
+    the guard. Runs main() in-process (not via subprocess) so the
+    monkeypatch applies to the actual module being exercised, and so the
+    test doesn't have to wait out however many real steps it'd otherwise
+    take training dynamics to organically produce a non-finite loss."""
+    import training.train_stage3_segmentation as train_mod
+
+    root = tmp_path / "fake_synthetic_ct"
+    _write_fake_synthetic_ct(root, [f"P{i:03d}" for i in range(4)])
+    config = _base_config(tmp_path, root, patch_size=None)
+    config["training"]["total_steps"] = 1000  # would run to completion (data is ordinary/finite) without the guard
+    config["training"]["max_consecutive_non_finite_skips"] = 3
+    cfg_path = tmp_path / "config.yaml"
+    with open(cfg_path, "w") as f:
+        yaml.safe_dump(config, f)
+
+    def always_non_finite_loss(logits, target, **kwargs):
+        return logits.sum() * float("nan")
+
+    monkeypatch.setattr(train_mod, "combined_loss", always_non_finite_loss)
+    monkeypatch.setattr(sys, "argv", ["train_stage3_segmentation.py", "--config", str(cfg_path)])
+
+    with pytest.raises(RuntimeError, match="consecutive non-finite-loss"):
+        train_mod.main()
