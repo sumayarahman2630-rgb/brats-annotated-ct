@@ -80,7 +80,12 @@ training:
   tversky_beta: 0.7
   focal_gamma: 2.0
   focal_alpha: 0.75
-  amp: true
+  # Disabled 2026-07-31 -- see stage3_ct_segmentation.yaml's comment: the
+  # model's forward pass overflowing fp16 (autocast) once weight magnitudes
+  # drift over thousands of steps was the confirmed cause of a repeated
+  # non-finite-loss lockup that recurred within a few dozen steps of every
+  # checkpoint-resume. amp=false forces fp32 throughout, closing that off.
+  amp: false
   grad_clip_norm: 1.0
   ema_decay: 0.999
   max_consecutive_non_finite_skips: 20

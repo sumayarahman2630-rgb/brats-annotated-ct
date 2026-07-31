@@ -156,7 +156,22 @@ training:
                                          # optional post-processing threshold search added tonight
                                          # (inference/postprocessing.py) is one way to partially compensate for
                                          # this at evaluation time without retraining.
-  amp: true
+  # Disabled 2026-07-31 after a real run repeatedly hit the
+  # max_consecutive_non_finite_skips guard just above, RECURRING within a
+  # few dozen steps of every checkpoint-resume -- not a one-off, meaning
+  # the checkpointed weights themselves were already numerically fragile,
+  # not just unlucky on one batch. Root cause: the model's forward pass
+  # runs under autocast (fp16) regardless of this flag's effect on the
+  # LOSS computation (already fixed to float32, 2026-07-22, see loss_kwargs
+  # call below) -- fp16's ~65504 max is a much easier ceiling to hit than
+  # fp32's once weight magnitudes drift upward over thousands of steps, and
+  # once a forward pass overflows, EVERY input overflows the same way
+  # (matching the observed "fails for every random patient" symptom, not
+  # just one). amp=false forces the whole forward pass to fp32, where this
+  # specific overflow mechanism is structurally not possible. Trades some
+  # step throughput for actually finishing a stable run -- worth it given
+  # how much real time repeated crash-and-restart had already cost.
+  amp: false
   grad_clip_norm: 1.0
   ema_decay: 0.999                      # EMA state saved for reference only -- inference/validate_jordan_segmentation.py always evaluates RAW weights, same anti-contamination pattern as Stage 1
   # Added 2026-07-31 after a real run got permanently stuck at one step number, logging
